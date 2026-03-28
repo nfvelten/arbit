@@ -29,8 +29,8 @@ mod tests {
     #[tokio::test]
     async fn non_tools_call_always_allowed() {
         let mw = make_mw(HashMap::new()); // unknown agent but method != tools/call
-        assert!(matches!(mw.check(&ctx("nobody", "initialize", None)).await, Decision::Allow));
-        assert!(matches!(mw.check(&ctx("nobody", "notifications/initialized", None)).await, Decision::Allow));
+        assert!(matches!(mw.check(&ctx("nobody", "initialize", None)).await, Decision::Allow { rl: None }));
+        assert!(matches!(mw.check(&ctx("nobody", "notifications/initialized", None)).await, Decision::Allow { rl: None }));
     }
 
     #[tokio::test]
@@ -57,7 +57,7 @@ mod tests {
         let mw = make_mw(agents);
         assert!(matches!(
             mw.check(&ctx("cursor", "tools/call", Some("read_file"))).await,
-            Decision::Allow
+            Decision::Allow { rl: None }
         ));
     }
 
@@ -68,7 +68,7 @@ mod tests {
         let mw = make_mw(agents);
         assert!(matches!(
             mw.check(&ctx("claude", "tools/call", Some("read_file"))).await,
-            Decision::Allow
+            Decision::Allow { rl: None }
         ));
     }
 
@@ -117,7 +117,7 @@ impl Middleware for AuthMiddleware {
 
     async fn check(&self, ctx: &McpContext) -> Decision {
         if ctx.method != "tools/call" {
-            return Decision::Allow;
+            return Decision::Allow { rl: None };
         }
 
         let tool = ctx.tool_name.as_deref().unwrap_or("");
@@ -125,12 +125,14 @@ impl Middleware for AuthMiddleware {
         let Some(policy) = cfg.agents.get(&ctx.agent_id) else {
             return Decision::Block {
                 reason: format!("unknown agent '{}'", ctx.agent_id),
+                rl: None,
             };
         };
 
         if policy.denied_tools.iter().any(|t| t == tool) {
             return Decision::Block {
                 reason: format!("tool '{tool}' explicitly denied"),
+                rl: None,
             };
         }
 
@@ -138,10 +140,11 @@ impl Middleware for AuthMiddleware {
             if !allowed.iter().any(|t| t == tool) {
                 return Decision::Block {
                     reason: format!("tool '{tool}' not in allowlist"),
+                    rl: None,
                 };
             }
         }
 
-        Decision::Allow
+        Decision::Allow { rl: None }
     }
 }

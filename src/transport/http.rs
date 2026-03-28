@@ -201,6 +201,34 @@ async fn shutdown_signal() {
     tracing::info!("shutdown signal received, draining audit");
 }
 
+// ── Rate-limit header helper ──────────────────────────────────────────────────
+
+/// Attach `X-RateLimit-*` (and `Retry-After` when remaining == 0) headers
+/// to any axum response, sourced from the pipeline's `RateLimitInfo`.
+fn insert_rl_headers(res: &mut axum::response::Response, rl: &crate::middleware::RateLimitInfo) {
+    let headers = res.headers_mut();
+    for (name, val) in [
+        ("x-ratelimit-limit", rl.limit.to_string()),
+        ("x-ratelimit-remaining", rl.remaining.to_string()),
+        ("x-ratelimit-reset", rl.reset_after_secs.to_string()),
+    ] {
+        if let (Ok(n), Ok(v)) = (
+            axum::http::HeaderName::from_bytes(name.as_bytes()),
+            HeaderValue::from_str(&val),
+        ) {
+            headers.insert(n, v);
+        }
+    }
+    if rl.remaining == 0 {
+        if let (Ok(n), Ok(v)) = (
+            axum::http::HeaderName::from_bytes(b"retry-after"),
+            HeaderValue::from_str(&rl.reset_after_secs.to_string()),
+        ) {
+            headers.insert(n, v);
+        }
+    }
+}
+
 // ── Handlers ─────────────────────────────────────────────────────────────────
 
 async fn handle_mcp(
@@ -235,12 +263,14 @@ async fn handle_mcp(
                     Ok(agent_name) => {
                         let session_id = state.sessions.create(agent_name.clone()).await;
                         tracing::info!(session_id, agent = agent_name, "JWT session created");
-                        return match state.gateway.handle(&agent_name, msg, client_ip).await {
-                            Some(response) => {
-                                let mut res = Json(response).into_response();
+                        let (response, rl) = state.gateway.handle(&agent_name, msg, client_ip).await;
+                        return match response {
+                            Some(body) => {
+                                let mut res = Json(body).into_response();
                                 if let Ok(val) = HeaderValue::from_str(&session_id) {
                                     res.headers_mut().insert("mcp-session-id", val);
                                 }
+                                if let Some(rl) = &rl { insert_rl_headers(&mut res, rl); }
                                 res
                             }
                             None => StatusCode::ACCEPTED.into_response(),
@@ -286,12 +316,14 @@ async fn handle_mcp(
         let session_id = state.sessions.create(agent_name.clone()).await;
         tracing::info!(session_id, agent = agent_name, "session created");
 
-        return match state.gateway.handle(&agent_name, msg, client_ip).await {
-            Some(response) => {
-                let mut res = Json(response).into_response();
+        let (response, rl) = state.gateway.handle(&agent_name, msg, client_ip).await;
+        return match response {
+            Some(body) => {
+                let mut res = Json(body).into_response();
                 if let Ok(val) = HeaderValue::from_str(&session_id) {
                     res.headers_mut().insert("mcp-session-id", val);
                 }
+                if let Some(rl) = &rl { insert_rl_headers(&mut res, rl); }
                 res
             }
             None => StatusCode::ACCEPTED.into_response(),
@@ -299,10 +331,17 @@ async fn handle_mcp(
     }
 
     match resolve_agent(&state.sessions, &headers).await {
-        Ok(agent_id) => match state.gateway.handle(&agent_id, msg, client_ip).await {
-            Some(response) => Json(response).into_response(),
-            None => StatusCode::ACCEPTED.into_response(),
-        },
+        Ok(agent_id) => {
+            let (response, rl) = state.gateway.handle(&agent_id, msg, client_ip).await;
+            match response {
+                Some(body) => {
+                    let mut res = Json(body).into_response();
+                    if let Some(rl) = &rl { insert_rl_headers(&mut res, rl); }
+                    res
+                }
+                None => StatusCode::ACCEPTED.into_response(),
+            }
+        }
         Err(status) => status.into_response(),
     }
 }

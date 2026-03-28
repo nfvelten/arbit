@@ -514,8 +514,79 @@ R4=$(curl -s -X POST -H "Content-Type: application/json" -H "Mcp-Session-Id: $IP
 check "first 3 calls within IP limit" "$R1$R2$R3" "hi"
 check "4th call exceeds IP rate limit" "$R4" "IP rate limit"
 
+check "4th call exceeds IP rate limit" "$R4" "IP rate limit"
+
 kill "$IP_GW_PID" 2>/dev/null || true
 rm -f "$IP_CONFIG"
+
+# ══ 23. Rate-limit response headers ══════════════════════════════════════════
+
+echo ""
+echo "━━━ 23. rate-limit response headers ━━━"
+
+# Reuse the main gateway (cursor: 60/min).
+# First: ensure X-RateLimit-Limit and X-RateLimit-Remaining are present on an allowed call.
+RL_SESSION=$(mcp_post "" '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"cursor","version":"1.0.0"}}}' \
+  && grep -i "mcp-session-id:" /tmp/mcp-headers.txt | awk '{print $2}' | tr -d '\r\n')
+RL_SESSION=$(grep -i "mcp-session-id:" /tmp/mcp-headers.txt | awk '{print $2}' | tr -d '\r\n')
+
+RL_CALL='{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"echo","arguments":{"text":"hi"}}}'
+curl -s -D /tmp/mcp-headers-rl.txt -X POST "http://localhost:$GATEWAY_PORT/mcp" \
+  -H "Content-Type: application/json" \
+  -H "Mcp-Session-Id: $RL_SESSION" \
+  -d "$RL_CALL" > /tmp/mcp-rl-body.txt 2>&1
+
+RL_LIMIT=$(grep -i "x-ratelimit-limit:" /tmp/mcp-headers-rl.txt | awk '{print $2}' | tr -d '\r\n')
+RL_REMAINING=$(grep -i "x-ratelimit-remaining:" /tmp/mcp-headers-rl.txt | awk '{print $2}' | tr -d '\r\n')
+RL_RESET=$(grep -i "x-ratelimit-reset:" /tmp/mcp-headers-rl.txt | awk '{print $2}' | tr -d '\r\n')
+
+[ -n "$RL_LIMIT" ]     && { echo "  PASS  X-RateLimit-Limit present ($RL_LIMIT)";     PASS=$((PASS+1)); } \
+  || { echo "  FAIL  X-RateLimit-Limit missing"; FAIL=$((FAIL+1)); }
+[ -n "$RL_REMAINING" ] && { echo "  PASS  X-RateLimit-Remaining present ($RL_REMAINING)"; PASS=$((PASS+1)); } \
+  || { echo "  FAIL  X-RateLimit-Remaining missing"; FAIL=$((FAIL+1)); }
+[ -n "$RL_RESET" ]     && { echo "  PASS  X-RateLimit-Reset present ($RL_RESET)";     PASS=$((PASS+1)); } \
+  || { echo "  FAIL  X-RateLimit-Reset missing"; FAIL=$((FAIL+1)); }
+
+# Rate-limit mini-gateway with limit=2 to trigger a block and check Retry-After
+RL_CONFIG=$(mktemp /tmp/gateway-rl-headers-XXXXXX.yml)
+cat > "$RL_CONFIG" <<'YAMLEOF'
+transport:
+  type: http
+  addr: "0.0.0.0:4002"
+  upstream: "http://localhost:3000/mcp"
+agents:
+  cursor:
+    rate_limit: 2
+YAMLEOF
+
+"$GATEWAY" "$RL_CONFIG" &
+RL_GW_PID=$!
+wait_for_port 4002
+
+RL2_SESSION=$(curl -s -D /tmp/mcp-headers-rl2.txt -X POST "http://localhost:4002/mcp" \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"cursor","version":"1.0.0"}}}' \
+  > /dev/null; grep -i "mcp-session-id:" /tmp/mcp-headers-rl2.txt | awk '{print $2}' | tr -d '\r\n')
+
+curl -s -X POST "http://localhost:4002/mcp" -H "Content-Type: application/json" \
+  -H "Mcp-Session-Id: $RL2_SESSION" -d "$RL_CALL" > /dev/null
+curl -s -X POST "http://localhost:4002/mcp" -H "Content-Type: application/json" \
+  -H "Mcp-Session-Id: $RL2_SESSION" -d "$RL_CALL" > /dev/null
+# 3rd call → blocked
+curl -s -D /tmp/mcp-headers-rl3.txt -X POST "http://localhost:4002/mcp" \
+  -H "Content-Type: application/json" \
+  -H "Mcp-Session-Id: $RL2_SESSION" -d "$RL_CALL" > /tmp/mcp-rl3-body.txt
+
+RETRY_AFTER=$(grep -i "retry-after:" /tmp/mcp-headers-rl3.txt | awk '{print $2}' | tr -d '\r\n')
+RL3_REMAINING=$(grep -i "x-ratelimit-remaining:" /tmp/mcp-headers-rl3.txt | awk '{print $2}' | tr -d '\r\n')
+
+[ -n "$RETRY_AFTER" ] && { echo "  PASS  Retry-After present on blocked call ($RETRY_AFTER)"; PASS=$((PASS+1)); } \
+  || { echo "  FAIL  Retry-After missing on blocked call"; FAIL=$((FAIL+1)); }
+[ "$RL3_REMAINING" = "0" ] && { echo "  PASS  X-RateLimit-Remaining=0 on blocked call"; PASS=$((PASS+1)); } \
+  || { echo "  FAIL  X-RateLimit-Remaining expected 0, got '$RL3_REMAINING'"; FAIL=$((FAIL+1)); }
+
+kill "$RL_GW_PID" 2>/dev/null || true
+rm -f "$RL_CONFIG"
 
 # ══ NEW: circuit breaker (last — kills dummy server) ══════════════════════════
 

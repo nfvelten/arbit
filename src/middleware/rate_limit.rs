@@ -50,14 +50,14 @@ mod tests {
             arguments: None,
             client_ip: None,
         };
-        assert!(matches!(mw.check(&ctx).await, Decision::Allow));
+        assert!(matches!(mw.check(&ctx).await, Decision::Allow { .. }));
     }
 
     #[tokio::test]
     async fn unknown_agent_passes_to_auth_middleware() {
         // Rate limit doesn't block unknown agents — that's auth's job
         let mw = make_mw(HashMap::new(), None);
-        assert!(matches!(mw.check(&ctx("ghost", "echo", None)).await, Decision::Allow));
+        assert!(matches!(mw.check(&ctx("ghost", "echo", None)).await, Decision::Allow { .. }));
     }
 
     #[tokio::test]
@@ -66,7 +66,7 @@ mod tests {
         agents.insert("a".to_string(), policy(3));
         let mw = make_mw(agents, None);
         for _ in 0..3 {
-            assert!(matches!(mw.check(&ctx("a", "echo", None)).await, Decision::Allow));
+            assert!(matches!(mw.check(&ctx("a", "echo", None)).await, Decision::Allow { .. }));
         }
     }
 
@@ -75,8 +75,8 @@ mod tests {
         let mut agents = HashMap::new();
         agents.insert("a".to_string(), policy(2));
         let mw = make_mw(agents, None);
-        assert!(matches!(mw.check(&ctx("a", "echo", None)).await, Decision::Allow));
-        assert!(matches!(mw.check(&ctx("a", "echo", None)).await, Decision::Allow));
+        assert!(matches!(mw.check(&ctx("a", "echo", None)).await, Decision::Allow { .. }));
+        assert!(matches!(mw.check(&ctx("a", "echo", None)).await, Decision::Allow { .. }));
         assert!(matches!(mw.check(&ctx("a", "echo", None)).await, Decision::Block { .. }));
     }
 
@@ -97,10 +97,10 @@ mod tests {
             },
         );
         let mw = make_mw(agents, None);
-        assert!(matches!(mw.check(&ctx("a", "search", None)).await, Decision::Allow));
+        assert!(matches!(mw.check(&ctx("a", "search", None)).await, Decision::Allow { .. }));
         assert!(matches!(mw.check(&ctx("a", "search", None)).await, Decision::Block { .. }));
         // Other tools not affected
-        assert!(matches!(mw.check(&ctx("a", "echo", None)).await, Decision::Allow));
+        assert!(matches!(mw.check(&ctx("a", "echo", None)).await, Decision::Allow { .. }));
     }
 
     #[tokio::test]
@@ -108,8 +108,8 @@ mod tests {
         let mut agents = HashMap::new();
         agents.insert("a".to_string(), policy(100));
         let mw = make_mw(agents, Some(2));
-        assert!(matches!(mw.check(&ctx("a", "echo", Some("1.2.3.4"))).await, Decision::Allow));
-        assert!(matches!(mw.check(&ctx("a", "echo", Some("1.2.3.4"))).await, Decision::Allow));
+        assert!(matches!(mw.check(&ctx("a", "echo", Some("1.2.3.4"))).await, Decision::Allow { .. }));
+        assert!(matches!(mw.check(&ctx("a", "echo", Some("1.2.3.4"))).await, Decision::Allow { .. }));
         assert!(matches!(mw.check(&ctx("a", "echo", Some("1.2.3.4"))).await, Decision::Block { .. }));
     }
 
@@ -118,10 +118,38 @@ mod tests {
         let mut agents = HashMap::new();
         agents.insert("a".to_string(), policy(100));
         let mw = make_mw(agents, Some(1));
-        assert!(matches!(mw.check(&ctx("a", "echo", Some("1.1.1.1"))).await, Decision::Allow));
-        assert!(matches!(mw.check(&ctx("a", "echo", Some("2.2.2.2"))).await, Decision::Allow));
+        assert!(matches!(mw.check(&ctx("a", "echo", Some("1.1.1.1"))).await, Decision::Allow { .. }));
+        assert!(matches!(mw.check(&ctx("a", "echo", Some("2.2.2.2"))).await, Decision::Allow { .. }));
         // Second call from first IP blocked
         assert!(matches!(mw.check(&ctx("a", "echo", Some("1.1.1.1"))).await, Decision::Block { .. }));
+    }
+
+    #[tokio::test]
+    async fn allow_carries_rate_limit_info() {
+        let mut agents = HashMap::new();
+        agents.insert("a".to_string(), policy(10));
+        let mw = make_mw(agents, None);
+        if let Decision::Allow { rl: Some(info) } = mw.check(&ctx("a", "echo", None)).await {
+            assert_eq!(info.limit, 10);
+            assert_eq!(info.remaining, 9); // 1 used
+            assert!(info.reset_after_secs <= 60);
+        } else {
+            panic!("expected Allow with RateLimitInfo");
+        }
+    }
+
+    #[tokio::test]
+    async fn block_carries_rate_limit_info_with_zero_remaining() {
+        let mut agents = HashMap::new();
+        agents.insert("a".to_string(), policy(1));
+        let mw = make_mw(agents, None);
+        let _ = mw.check(&ctx("a", "echo", None)).await; // consume the 1 allowed
+        if let Decision::Block { rl: Some(info), .. } = mw.check(&ctx("a", "echo", None)).await {
+            assert_eq!(info.limit, 1);
+            assert_eq!(info.remaining, 0);
+        } else {
+            panic!("expected Block with RateLimitInfo");
+        }
     }
 
     #[tokio::test]
@@ -129,10 +157,24 @@ mod tests {
         let mut agents = HashMap::new();
         agents.insert("a".to_string(), policy(100));
         let mw = make_mw(agents, Some(1));
-        // Multiple calls without IP — IP limit never applied
         for _ in 0..5 {
-            assert!(matches!(mw.check(&ctx("a", "echo", None)).await, Decision::Allow));
+            assert!(matches!(mw.check(&ctx("a", "echo", None)).await, Decision::Allow { .. }));
         }
+    }
+
+    #[tokio::test]
+    async fn remaining_count_decrements() {
+        let mut agents = HashMap::new();
+        agents.insert("a".to_string(), policy(5));
+        let mw = make_mw(agents, None);
+        for expected_remaining in (0..5).rev() {
+            if let Decision::Allow { rl: Some(info) } = mw.check(&ctx("a", "echo", None)).await {
+                assert_eq!(info.remaining, expected_remaining);
+            } else {
+                panic!("expected Allow");
+            }
+        }
+        assert!(matches!(mw.check(&ctx("a", "echo", None)).await, Decision::Block { .. }));
     }
 }
 
@@ -195,6 +237,16 @@ impl RateLimitMiddleware {
     }
 }
 
+/// Seconds until the oldest timestamp in `ts` ages out of the 60s window.
+fn window_reset_secs(ts: &[Instant], now: Instant) -> u64 {
+    ts.first()
+        .map(|oldest| {
+            let elapsed = now.duration_since(*oldest).as_secs();
+            60u64.saturating_sub(elapsed)
+        })
+        .unwrap_or(60)
+}
+
 #[async_trait]
 impl Middleware for RateLimitMiddleware {
     fn name(&self) -> &'static str {
@@ -202,14 +254,16 @@ impl Middleware for RateLimitMiddleware {
     }
 
     async fn check(&self, ctx: &McpContext) -> Decision {
+        use super::RateLimitInfo;
+
         if ctx.method != "tools/call" {
-            return Decision::Allow;
+            return Decision::Allow { rl: None };
         }
 
         let (global_limit, tool_limit, ip_limit) = {
             let cfg = self.config.borrow();
             let Some(policy) = cfg.agents.get(&ctx.agent_id) else {
-                return Decision::Allow; // unknown agents are blocked by AuthMiddleware
+                return Decision::Allow { rl: None }; // unknown agents are blocked by AuthMiddleware
             };
             let tool_limit = ctx
                 .tool_name
@@ -229,13 +283,18 @@ impl Middleware for RateLimitMiddleware {
             if ts.len() >= limit {
                 return Decision::Block {
                     reason: format!("IP rate limit exceeded ({limit}/min)"),
+                    rl: Some(RateLimitInfo {
+                        limit,
+                        remaining: 0,
+                        reset_after_secs: window_reset_secs(ts, now),
+                    }),
                 };
             }
             ts.push(now);
         }
 
         // ── Global agent rate limit ────────────────────────────────────────────
-        {
+        let agent_rl = {
             let mut counts = self.counts.lock().await;
             let ts = counts.entry(ctx.agent_id.clone()).or_default();
             ts.retain(|t| now.duration_since(*t) < window);
@@ -243,13 +302,20 @@ impl Middleware for RateLimitMiddleware {
             if ts.len() >= global_limit {
                 return Decision::Block {
                     reason: format!("rate limit exceeded ({global_limit}/min)"),
+                    rl: Some(RateLimitInfo {
+                        limit: global_limit,
+                        remaining: 0,
+                        reset_after_secs: window_reset_secs(ts, now),
+                    }),
                 };
             }
             ts.push(now);
-            if ts.is_empty() {
-                counts.remove(&ctx.agent_id);
+            RateLimitInfo {
+                limit: global_limit,
+                remaining: global_limit.saturating_sub(ts.len()),
+                reset_after_secs: window_reset_secs(ts, now),
             }
-        }
+        };
 
         // ── Per-tool rate limit ────────────────────────────────────────────────
         if let (Some(limit), Some(tool)) = (tool_limit, ctx.tool_name.as_ref()) {
@@ -261,14 +327,16 @@ impl Middleware for RateLimitMiddleware {
             if ts.len() >= limit {
                 return Decision::Block {
                     reason: format!("tool '{tool}' rate limit exceeded ({limit}/min)"),
+                    rl: Some(RateLimitInfo {
+                        limit,
+                        remaining: 0,
+                        reset_after_secs: window_reset_secs(ts, now),
+                    }),
                 };
             }
             ts.push(now);
-            if ts.is_empty() {
-                tool_counts.remove(&key);
-            }
         }
 
-        Decision::Allow
+        Decision::Allow { rl: Some(agent_rl) }
     }
 }

@@ -16,10 +16,22 @@ pub struct McpContext {
     pub client_ip: Option<String>,
 }
 
+/// Rate-limit metadata attached to every tools/call decision.
+/// The HTTP transport uses this to populate `X-RateLimit-*` response headers.
+#[derive(Debug, Clone)]
+pub struct RateLimitInfo {
+    /// Configured limit (requests / 60-second window).
+    pub limit: usize,
+    /// Requests remaining in the current window after this one.
+    pub remaining: usize,
+    /// Seconds until the oldest in-window request ages out (≤ 60).
+    pub reset_after_secs: u64,
+}
+
 /// Middleware decision: continue or block with a reason.
 pub enum Decision {
-    Allow,
-    Block { reason: String },
+    Allow { rl: Option<RateLimitInfo> },
+    Block { reason: String, rl: Option<RateLimitInfo> },
 }
 
 /// Core trait — each middleware implements `check`.
@@ -49,14 +61,20 @@ impl Pipeline {
     }
 
     /// Run all middlewares. Stops at the first `Block`.
+    /// The last `Allow`'s `RateLimitInfo` (if any) is forwarded to the caller.
     pub async fn run(&self, ctx: &McpContext) -> Decision {
+        let mut last_rl: Option<RateLimitInfo> = None;
         for mw in &self.middlewares {
             match mw.check(ctx).await {
-                Decision::Allow => continue,
+                Decision::Allow { rl } => {
+                    if rl.is_some() {
+                        last_rl = rl;
+                    }
+                }
                 block => return block,
             }
         }
-        Decision::Allow
+        Decision::Allow { rl: last_rl }
     }
 }
 
@@ -69,7 +87,7 @@ mod tests {
     #[async_trait]
     impl Middleware for AlwaysAllow {
         fn name(&self) -> &'static str { "allow" }
-        async fn check(&self, _: &McpContext) -> Decision { Decision::Allow }
+        async fn check(&self, _: &McpContext) -> Decision { Decision::Allow { rl: None } }
     }
 
     struct AlwaysBlock;
@@ -77,7 +95,7 @@ mod tests {
     impl Middleware for AlwaysBlock {
         fn name(&self) -> &'static str { "block" }
         async fn check(&self, _: &McpContext) -> Decision {
-            Decision::Block { reason: "blocked".to_string() }
+            Decision::Block { reason: "blocked".to_string(), rl: None }
         }
     }
 
@@ -87,7 +105,7 @@ mod tests {
         fn name(&self) -> &'static str { "counter" }
         async fn check(&self, _: &McpContext) -> Decision {
             self.0.fetch_add(1, Ordering::SeqCst);
-            Decision::Allow
+            Decision::Allow { rl: None }
         }
     }
 
@@ -104,7 +122,7 @@ mod tests {
     #[tokio::test]
     async fn empty_pipeline_allows() {
         let p = Pipeline::new();
-        assert!(matches!(p.run(&ctx()).await, Decision::Allow));
+        assert!(matches!(p.run(&ctx()).await, Decision::Allow { .. }));
     }
 
     #[tokio::test]
@@ -112,7 +130,7 @@ mod tests {
         let p = Pipeline::new()
             .add(Arc::new(AlwaysAllow))
             .add(Arc::new(AlwaysAllow));
-        assert!(matches!(p.run(&ctx()).await, Decision::Allow));
+        assert!(matches!(p.run(&ctx()).await, Decision::Allow { .. }));
     }
 
     #[tokio::test]
@@ -122,7 +140,7 @@ mod tests {
             .add(Arc::new(AlwaysBlock))
             .add(Arc::new(Counter(Arc::clone(&counter))));
         assert!(matches!(p.run(&ctx()).await, Decision::Block { .. }));
-        assert_eq!(counter.load(Ordering::SeqCst), 0); // second middleware never ran
+        assert_eq!(counter.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
@@ -139,7 +157,7 @@ mod tests {
     #[tokio::test]
     async fn block_reason_preserved() {
         let p = Pipeline::new().add(Arc::new(AlwaysBlock));
-        if let Decision::Block { reason } = p.run(&ctx()).await {
+        if let Decision::Block { reason, .. } = p.run(&ctx()).await {
             assert_eq!(reason, "blocked");
         } else {
             panic!("expected Block");

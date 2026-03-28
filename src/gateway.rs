@@ -2,7 +2,7 @@ use crate::{
     audit::{AuditEntry, AuditLog, Outcome},
     live_config::LiveConfig,
     metrics::GatewayMetrics,
-    middleware::{Decision, McpContext, Pipeline},
+    middleware::{Decision, McpContext, Pipeline, RateLimitInfo},
     upstream::McpUpstream,
 };
 use serde_json::{json, Value};
@@ -49,19 +49,22 @@ impl McpGateway {
         self.upstream_for(agent_id).base_url().to_string()
     }
 
-    /// Check policy without forwarding.
-    /// `None` = allowed, `Some(error)` = blocked.
-    /// Used by StdioTransport, which manages piping directly.
+    /// Check policy without forwarding. Returns `None` = allowed, `Some(error)` = blocked.
+    /// Used by StdioTransport, which manages piping directly and doesn't need rate limit headers.
     pub async fn intercept(&self, agent_id: &str, msg: &Value) -> Option<Value> {
-        self.intercept_with_ip(agent_id, msg, None).await
+        self.intercept_with_ip(agent_id, msg, None).await.0
     }
 
+    /// Returns `(error_response, rate_limit_info)`.
+    /// - `error_response`: `Some` = blocked (JSON-RPC error), `None` = allowed
+    /// - `rate_limit_info`: present when a rate-limit check was performed (HTTP transport
+    ///   uses this to populate `X-RateLimit-*` headers)
     pub async fn intercept_with_ip(
         &self,
         agent_id: &str,
         msg: &Value,
         client_ip: Option<String>,
-    ) -> Option<Value> {
+    ) -> (Option<Value>, Option<RateLimitInfo>) {
         let method = msg["method"].as_str().unwrap_or("");
 
         if method != "tools/call" {
@@ -73,7 +76,7 @@ impl McpGateway {
                 outcome: Outcome::Forwarded,
             }));
             self.metrics.record(agent_id, "forwarded");
-            return None;
+            return (None, None);
         }
 
         let id = msg["id"].clone();
@@ -89,7 +92,7 @@ impl McpGateway {
         };
 
         match self.pipeline.run(&ctx).await {
-            Decision::Allow => {
+            Decision::Allow { rl } => {
                 self.audit.record(Arc::new(AuditEntry {
                     ts: SystemTime::now(),
                     agent_id: agent_id.to_string(),
@@ -98,9 +101,9 @@ impl McpGateway {
                     outcome: Outcome::Allowed,
                 }));
                 self.metrics.record(agent_id, "allowed");
-                None
+                (None, rl)
             }
-            Decision::Block { reason } => {
+            Decision::Block { reason, rl } => {
                 self.audit.record(Arc::new(AuditEntry {
                     ts: SystemTime::now(),
                     agent_id: agent_id.to_string(),
@@ -109,33 +112,41 @@ impl McpGateway {
                     outcome: Outcome::Blocked(reason.clone()),
                 }));
                 self.metrics.record(agent_id, "blocked");
-                Some(json!({
-                    "jsonrpc": "2.0",
-                    "id": id,
-                    "error": { "code": -32603, "message": format!("blocked: {reason}") }
-                }))
+                (
+                    Some(json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "error": { "code": -32603, "message": format!("blocked: {reason}") }
+                    })),
+                    rl,
+                )
             }
         }
     }
 
     /// Policy check + upstream forwarding + response filtering.
-    /// Used by HttpTransport.
-    pub async fn handle(&self, agent_id: &str, msg: Value, client_ip: Option<String>) -> Option<Value> {
+    /// Returns `(response, rate_limit_info)` for the HTTP transport.
+    pub async fn handle(
+        &self,
+        agent_id: &str,
+        msg: Value,
+        client_ip: Option<String>,
+    ) -> (Option<Value>, Option<RateLimitInfo>) {
         let method = msg["method"].as_str().unwrap_or("").to_string();
 
-        match self.intercept_with_ip(agent_id, &msg, client_ip).await {
-            Some(err) => Some(err),
-            None => {
-                let response = self.upstream_for(agent_id).forward(&msg).await;
-                let response = if method == "tools/list" {
-                    response.map(|r| self.filter_tools_response(agent_id, r))
-                } else {
-                    response
-                };
-                // Apply response filtering — block responses containing sensitive data
-                response.map(|r| self.filter_response(r))
-            }
+        let (err, rl) = self.intercept_with_ip(agent_id, &msg, client_ip).await;
+        if let Some(err) = err {
+            return (Some(err), rl);
         }
+
+        let response = self.upstream_for(agent_id).forward(&msg).await;
+        let response = if method == "tools/list" {
+            response.map(|r| self.filter_tools_response(agent_id, r))
+        } else {
+            response
+        };
+        let response = response.map(|r| self.filter_response(r));
+        (response, rl)
     }
 
     /// Filters the tools list in a `tools/list` response according to agent policy.

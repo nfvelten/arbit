@@ -38,7 +38,7 @@ mod tests {
             arguments: Some(json!({"secret": "value"})),
             client_ip: None,
         };
-        assert!(matches!(mw.check(&ctx).await, Decision::Allow));
+        assert!(matches!(mw.check(&ctx).await, Decision::Allow { rl: None }));
     }
 
     #[tokio::test]
@@ -52,14 +52,14 @@ mod tests {
             arguments: None,
             client_ip: None,
         };
-        assert!(matches!(mw.check(&ctx).await, Decision::Allow));
+        assert!(matches!(mw.check(&ctx).await, Decision::Allow { rl: None }));
     }
 
     #[tokio::test]
     async fn no_patterns_always_allowed() {
         let mw = make_mw(vec![]);
         let ctx = ctx_call("echo", json!({"secret_password": "hunter2"}));
-        assert!(matches!(mw.check(&ctx).await, Decision::Allow));
+        assert!(matches!(mw.check(&ctx).await, Decision::Allow { rl: None }));
     }
 
     #[tokio::test]
@@ -75,7 +75,7 @@ mod tests {
         let re = Regex::new("private_key").unwrap();
         let mw = make_mw(vec![re]);
         let ctx = ctx_call("echo", json!({"input": "harmless text"}));
-        assert!(matches!(mw.check(&ctx).await, Decision::Allow));
+        assert!(matches!(mw.check(&ctx).await, Decision::Allow { rl: None }));
     }
 
     #[tokio::test]
@@ -83,7 +83,7 @@ mod tests {
         let re = Regex::new("secret").unwrap();
         let mw = make_mw(vec![re]);
         let ctx = ctx_call("echo", json!({"msg": "my secret value"}));
-        if let Decision::Block { reason } = mw.check(&ctx).await {
+        if let Decision::Block { reason, .. } = mw.check(&ctx).await {
             assert!(reason.contains("secret"));
         } else {
             panic!("expected Block");
@@ -109,19 +109,19 @@ impl Middleware for PayloadFilterMiddleware {
 
     async fn check(&self, ctx: &McpContext) -> Decision {
         if ctx.method != "tools/call" {
-            return Decision::Allow;
+            return Decision::Allow { rl: None };
         }
 
         let args = match &ctx.arguments {
             Some(v) => v,
-            None => return Decision::Allow,
+            None => return Decision::Allow { rl: None },
         };
 
         // Snapshot patterns — Arc clone is O(1); no per-Regex allocation
         let patterns = {
             let cfg = self.config.borrow();
             if cfg.block_patterns.is_empty() {
-                return Decision::Allow;
+                return Decision::Allow { rl: None };
             }
             Arc::clone(&cfg.block_patterns)
         };
@@ -131,10 +131,11 @@ impl Middleware for PayloadFilterMiddleware {
             if pattern.is_match(&text) {
                 return Decision::Block {
                     reason: format!("sensitive data detected (pattern: {})", pattern.as_str()),
+                    rl: None,
                 };
             }
         }
 
-        Decision::Allow
+        Decision::Allow { rl: None }
     }
 }
