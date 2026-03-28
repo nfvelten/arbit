@@ -4,7 +4,7 @@ pub mod stdout;
 pub mod webhook;
 
 use async_trait::async_trait;
-use std::time::SystemTime;
+use std::{sync::Arc, time::SystemTime};
 
 #[derive(Clone)]
 pub struct AuditEntry {
@@ -24,9 +24,14 @@ pub enum Outcome {
 
 /// Pluggable audit log — swap SQLite, file, or external service
 /// without changing anything in the gateway core.
+///
+/// `record` takes an `Arc<AuditEntry>` so fan-out to multiple backends
+/// is a cheap pointer clone, not a deep copy per backend.
+///
+/// Implementations MUST be `Send + Sync` and safe to call from any async context.
 #[async_trait]
 pub trait AuditLog: Send + Sync {
-    fn record(&self, entry: AuditEntry);
+    fn record(&self, entry: Arc<AuditEntry>);
     /// Flush all pending writes. Called on graceful shutdown.
     async fn flush(&self) {}
 }

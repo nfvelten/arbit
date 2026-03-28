@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use std::sync::Arc;
 
 /// Fans out every audit event to multiple backends simultaneously.
-/// All backends receive the same entry; flush waits for all of them.
+/// Uses `Arc<AuditEntry>` so all backends share the same allocation.
 pub struct FanoutAudit {
     backends: Vec<Arc<dyn AuditLog>>,
 }
@@ -16,9 +16,9 @@ impl FanoutAudit {
 
 #[async_trait]
 impl AuditLog for FanoutAudit {
-    fn record(&self, entry: AuditEntry) {
+    fn record(&self, entry: Arc<AuditEntry>) {
         for backend in &self.backends {
-            backend.record(entry.clone());
+            backend.record(Arc::clone(&entry));
         }
     }
 

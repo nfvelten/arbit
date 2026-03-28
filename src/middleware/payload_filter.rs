@@ -30,17 +30,17 @@ impl Middleware for PayloadFilterMiddleware {
             None => return Decision::Allow,
         };
 
-        // Snapshot patterns — drop the borrow before serializing args
+        // Snapshot patterns — Arc clone is O(1); no per-Regex allocation
         let patterns = {
             let cfg = self.config.borrow();
             if cfg.block_patterns.is_empty() {
                 return Decision::Allow;
             }
-            cfg.block_patterns.iter().map(|r| r.clone()).collect::<Vec<_>>()
+            Arc::clone(&cfg.block_patterns)
         };
 
         let text = args.to_string();
-        for pattern in &patterns {
+        for pattern in patterns.as_ref() {
             if pattern.is_match(&text) {
                 return Decision::Block {
                     reason: format!("sensitive data detected (pattern: {})", pattern.as_str()),

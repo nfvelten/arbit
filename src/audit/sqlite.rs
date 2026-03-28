@@ -6,7 +6,7 @@ use std::time::SystemTime;
 use tokio::sync::mpsc;
 
 pub struct SqliteAudit {
-    tx: Arc<Mutex<Option<mpsc::UnboundedSender<AuditEntry>>>>,
+    tx: Arc<Mutex<Option<mpsc::UnboundedSender<Arc<AuditEntry>>>>>,
     handle: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
 }
 
@@ -33,7 +33,7 @@ impl SqliteAudit {
             );",
         )?;
         let conn = Arc::new(Mutex::new(conn));
-        let (tx, mut rx) = mpsc::unbounded_channel::<AuditEntry>();
+        let (tx, mut rx) = mpsc::unbounded_channel::<Arc<AuditEntry>>();
 
         let handle = tokio::spawn(async move {
             while let Some(entry) = rx.recv().await {
@@ -49,6 +49,7 @@ impl SqliteAudit {
                     Outcome::Forwarded => ("forwarded".to_string(), None),
                 };
 
+                // Emit structured log for every persisted entry
                 match &entry.outcome {
                     Outcome::Allowed => tracing::info!(
                         outcome = "allowed",
@@ -73,7 +74,7 @@ impl SqliteAudit {
                 let conn = conn.clone();
                 tokio::task::spawn_blocking(move || {
                     if let Ok(c) = conn.lock() {
-                        let _ = c.execute(
+                        if let Err(e) = c.execute(
                             "INSERT INTO audit_log (ts, agent_id, method, tool, outcome, reason)
                              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                             params![
@@ -84,14 +85,23 @@ impl SqliteAudit {
                                 outcome_str,
                                 reason
                             ],
-                        );
+                        ) {
+                            tracing::error!(
+                                error = %e,
+                                agent = %entry.agent_id,
+                                "audit insert failed"
+                            );
+                        }
+
                         // Rotate by entry count — keep only the newest N rows
                         if let Some(max) = max_entries {
-                            let _ = c.execute(
+                            if let Err(e) = c.execute(
                                 "DELETE FROM audit_log WHERE id NOT IN \
                                  (SELECT id FROM audit_log ORDER BY id DESC LIMIT ?1)",
                                 params![max as i64],
-                            );
+                            ) {
+                                tracing::warn!(error = %e, "audit rotation (max_entries) failed");
+                            }
                         }
                         // Rotate by age — purge entries older than max_age_days
                         if let Some(days) = max_age_days {
@@ -100,10 +110,12 @@ impl SqliteAudit {
                                 .unwrap_or_default()
                                 .as_secs() as i64
                                 - (days as i64 * 86400);
-                            let _ = c.execute(
+                            if let Err(e) = c.execute(
                                 "DELETE FROM audit_log WHERE ts < ?1",
                                 params![cutoff],
-                            );
+                            ) {
+                                tracing::warn!(error = %e, "audit rotation (max_age_days) failed");
+                            }
                         }
                     }
                 })
@@ -121,7 +133,7 @@ impl SqliteAudit {
 
 #[async_trait]
 impl AuditLog for SqliteAudit {
-    fn record(&self, entry: AuditEntry) {
+    fn record(&self, entry: Arc<AuditEntry>) {
         if let Ok(guard) = self.tx.lock() {
             if let Some(tx) = guard.as_ref() {
                 let _ = tx.send(entry);

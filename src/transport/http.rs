@@ -18,6 +18,7 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use futures_util::StreamExt;
 use serde_json::Value;
 use std::{collections::HashMap, convert::Infallible, net::SocketAddr, sync::Arc, time::Instant};
+use subtle::ConstantTimeEq;
 use tokio::sync::{watch, Mutex};
 use uuid::Uuid;
 
@@ -30,8 +31,25 @@ struct SessionStore {
 }
 
 impl SessionStore {
-    fn new(ttl_secs: u64) -> Self {
-        Self { sessions: Mutex::new(HashMap::new()), ttl_secs }
+    fn new(ttl_secs: u64) -> Arc<Self> {
+        let store = Arc::new(Self { sessions: Mutex::new(HashMap::new()), ttl_secs });
+        // Periodically evict expired sessions so the map doesn't grow unbounded
+        // when `create` is never called (e.g., long-lived connections only).
+        let weak = Arc::downgrade(&store);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+            interval.tick().await; // skip immediate tick
+            loop {
+                interval.tick().await;
+                let Some(s) = weak.upgrade() else { break };
+                let now = Instant::now();
+                let ttl = s.ttl_secs;
+                s.sessions.lock().await.retain(|_, (_, created)| {
+                    now.duration_since(*created).as_secs() < ttl
+                });
+            }
+        });
+        store
     }
 
     async fn create(&self, agent_id: String) -> String {
@@ -70,6 +88,8 @@ pub struct HttpTransport {
     /// Path to the SQLite audit DB for the /dashboard endpoint.
     /// None when audit is not SQLite or dashboard is disabled.
     audit_db: Option<String>,
+    /// Optional Bearer token required to access /dashboard and /metrics.
+    admin_token: Option<String>,
 }
 
 impl HttpTransport {
@@ -81,8 +101,9 @@ impl HttpTransport {
         config: watch::Receiver<Arc<LiveConfig>>,
         jwt: Option<Arc<JwtValidator>>,
         audit_db: Option<String>,
+        admin_token: Option<String>,
     ) -> Self {
-        Self { addr: addr.into(), session_ttl_secs, tls, metrics, config, jwt, audit_db }
+        Self { addr: addr.into(), session_ttl_secs, tls, metrics, config, jwt, audit_db, admin_token }
     }
 }
 
@@ -94,6 +115,8 @@ struct HttpState {
     /// Optional JWT validator — present when `auth.jwt` is configured.
     jwt: Option<Arc<JwtValidator>>,
     audit_db: Option<String>,
+    /// Optional Bearer token required to access /dashboard and /metrics.
+    admin_token: Option<String>,
 }
 
 const MAX_AGENT_ID_LEN: usize = 128;
@@ -103,11 +126,12 @@ impl Transport for HttpTransport {
     async fn serve(&self, gateway: Arc<McpGateway>) -> anyhow::Result<()> {
         let state = Arc::new(HttpState {
             gateway,
-            sessions: Arc::new(SessionStore::new(self.session_ttl_secs)),
+            sessions: SessionStore::new(self.session_ttl_secs),
             metrics: Arc::clone(&self.metrics),
             config: self.config.clone(),
             jwt: self.jwt.clone(),
             audit_db: self.audit_db.clone(),
+            admin_token: self.admin_token.clone(),
         });
 
         let app = Router::new()
@@ -236,8 +260,13 @@ async fn handle_mcp(
         let agent_name = {
             let cfg = state.config.borrow();
             if let Some(provided_key) = headers.get("x-api-key").and_then(|v| v.to_str().ok()) {
-                match cfg.api_keys.get(provided_key) {
-                    Some(name) => name.clone(),
+                // Constant-time lookup: find the matching stored key without short-circuiting
+                // on the first character match to prevent timing-based key enumeration.
+                let matched = cfg.api_keys.iter().find(|(stored_key, _)| {
+                    stored_key.as_bytes().ct_eq(provided_key.as_bytes()).into()
+                });
+                match matched {
+                    Some((_, name)) => name.clone(),
                     None => {
                         tracing::warn!("unknown api_key");
                         return StatusCode::UNAUTHORIZED.into_response();
@@ -305,7 +334,28 @@ async fn handle_health() -> impl IntoResponse {
     )
 }
 
-async fn handle_metrics(State(state): State<Arc<HttpState>>) -> impl IntoResponse {
+/// Returns `true` if the request is authorized to access admin endpoints.
+/// If `admin_token` is None, the endpoint is publicly accessible.
+/// Otherwise, the request must carry `Authorization: Bearer <admin_token>`.
+fn check_admin_auth(state: &HttpState, headers: &HeaderMap) -> bool {
+    let Some(expected) = &state.admin_token else {
+        return true; // no token configured → open
+    };
+    let provided = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .unwrap_or("");
+    expected.as_bytes().ct_eq(provided.as_bytes()).into()
+}
+
+async fn handle_metrics(
+    State(state): State<Arc<HttpState>>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if !check_admin_auth(&state, &headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
     let body = state.metrics.render();
     (
         [(
@@ -314,12 +364,20 @@ async fn handle_metrics(State(state): State<Arc<HttpState>>) -> impl IntoRespons
         )],
         body,
     )
+    .into_response()
 }
 
 // ── Dashboard ─────────────────────────────────────────────────────────────────
 
-async fn handle_dashboard(State(state): State<Arc<HttpState>>) -> impl IntoResponse {
+async fn handle_dashboard(
+    State(state): State<Arc<HttpState>>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
     use axum::http::header::CONTENT_TYPE;
+
+    if !check_admin_auth(&state, &headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
 
     let Some(db_path) = &state.audit_db else {
         return (
@@ -332,29 +390,33 @@ async fn handle_dashboard(State(state): State<Arc<HttpState>>) -> impl IntoRespo
 
     let db_path = db_path.clone();
     let rows: Vec<(i64, String, String, Option<String>, String, Option<String>)> =
-        tokio::task::spawn_blocking(move || {
-            let conn = rusqlite::Connection::open(&db_path)?;
-            let mut stmt = conn.prepare(
-                "SELECT ts, agent_id, method, tool, outcome, reason \
-                 FROM audit_log ORDER BY id DESC LIMIT 200",
-            )?;
-            let rows = stmt
-                .query_map([], |row| {
-                    Ok((
-                        row.get::<_, i64>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                        row.get::<_, Option<String>>(3)?,
-                        row.get::<_, String>(4)?,
-                        row.get::<_, Option<String>>(5)?,
-                    ))
-                })?
-                .filter_map(|r| r.ok())
-                .collect();
-            anyhow::Ok(rows)
-        })
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            tokio::task::spawn_blocking(move || {
+                let conn = rusqlite::Connection::open(&db_path)?;
+                let mut stmt = conn.prepare(
+                    "SELECT ts, agent_id, method, tool, outcome, reason \
+                     FROM audit_log ORDER BY id DESC LIMIT 200",
+                )?;
+                let rows = stmt
+                    .query_map([], |row| {
+                        Ok((
+                            row.get::<_, i64>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, Option<String>>(3)?,
+                            row.get::<_, String>(4)?,
+                            row.get::<_, Option<String>>(5)?,
+                        ))
+                    })?
+                    .filter_map(|r| r.ok())
+                    .collect();
+                anyhow::Ok(rows)
+            }),
+        )
         .await
         .ok()
+        .and_then(|r| r.ok())
         .and_then(|r| r.ok())
         .unwrap_or_default();
 
@@ -421,40 +483,11 @@ async fn handle_dashboard(State(state): State<Arc<HttpState>>) -> impl IntoRespo
 }
 
 fn chrono_ts(ts: i64) -> String {
-    use std::time::{Duration, UNIX_EPOCH};
-    let d = UNIX_EPOCH + Duration::from_secs(ts as u64);
-    let secs = ts % 86400;
-    let h = (secs / 3600) % 24;
-    let m = (secs % 3600) / 60;
-    let s = secs % 60;
-    // Days since epoch → approximate date (good enough for display)
-    let days = ts / 86400;
-    let epoch_year = 1970i64;
-    let mut year = epoch_year;
-    let mut rem = days;
-    loop {
-        let dy = if is_leap(year) { 366 } else { 365 };
-        if rem < dy { break; }
-        rem -= dy;
-        year += 1;
-    }
-    let months = if is_leap(year) {
-        [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-    } else {
-        [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-    };
-    let mut month = 1i64;
-    for &days_in_month in &months {
-        if rem < days_in_month { break; }
-        rem -= days_in_month;
-        month += 1;
-    }
-    let day = rem + 1;
-    format!("{year}-{month:02}-{day:02} {h:02}:{m:02}:{s:02}")
-}
-
-fn is_leap(y: i64) -> bool {
-    (y % 4 == 0 && y % 100 != 0) || y % 400 == 0
+    use chrono::{TimeZone, Utc};
+    Utc.timestamp_opt(ts, 0)
+        .single()
+        .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
+        .unwrap_or_else(|| ts.to_string())
 }
 
 fn html_escape(s: &str) -> String {
@@ -583,7 +616,7 @@ fn parse_and_filter_sse(
     let data = {
         let cfg = config_rx.borrow();
         let mut out = data;
-        for pattern in &cfg.block_patterns {
+        for pattern in cfg.block_patterns.as_ref() {
             if pattern.is_match(&out) {
                 tracing::info!(pattern = pattern.as_str(), "sensitive data redacted from SSE event");
                 out = pattern.replace_all(&out, "[REDACTED]").into_owned();

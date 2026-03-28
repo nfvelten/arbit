@@ -9,7 +9,9 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
-use tokio::sync::Mutex;
+use tokio::{sync::Mutex, time::timeout};
+
+const JWKS_FETCH_TIMEOUT: Duration = Duration::from_secs(5);
 
 // ── JWKS cache ────────────────────────────────────────────────────────────────
 
@@ -107,13 +109,17 @@ impl JwtValidator {
             }
         }
 
-        // Fetch fresh JWKS
-        let body = reqwest::get(url)
-            .await
-            .map_err(|e| format!("JWKS fetch failed: {e}"))?
-            .text()
-            .await
-            .map_err(|e| format!("JWKS read failed: {e}"))?;
+        // Fetch fresh JWKS — abort if the endpoint doesn't respond in time
+        let body = timeout(JWKS_FETCH_TIMEOUT, async {
+            reqwest::get(url)
+                .await
+                .map_err(|e| format!("JWKS fetch failed: {e}"))?
+                .text()
+                .await
+                .map_err(|e| format!("JWKS read failed: {e}"))
+        })
+        .await
+        .map_err(|_| "JWKS fetch timed out".to_string())??;
 
         let keys: JwkSet =
             serde_json::from_str(&body).map_err(|e| format!("JWKS parse failed: {e}"))?;
@@ -128,6 +134,9 @@ impl JwtValidator {
     // ── Shared helpers ────────────────────────────────────────────────────────
 
     fn apply_validation_options(&self, v: &mut Validation) {
+        // exp is always required — tokens without an expiry are rejected
+        v.set_required_spec_claims(&["exp"]);
+
         if let Some(iss) = &self.config.issuer {
             v.set_issuer(&[iss]);
         }

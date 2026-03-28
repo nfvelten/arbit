@@ -21,6 +21,9 @@ pub struct Config {
     pub upstreams: HashMap<String, String>,
     /// Optional JWT / OIDC authentication configuration.
     pub auth: Option<JwtConfig>,
+    /// Optional Bearer token required to access `/dashboard` and `/metrics`.
+    /// When unset both endpoints are publicly accessible.
+    pub admin_token: Option<String>,
 }
 
 // ── Transport ────────────────────────────────────────────────────────────────
@@ -194,6 +197,20 @@ impl Config {
         for pattern in &self.rules.block_patterns {
             Regex::new(pattern)
                 .map_err(|e| anyhow::anyhow!("invalid block_pattern '{}': {}", pattern, e))?;
+        }
+
+        // Validate tool names contain only safe characters to prevent injection
+        let tool_name_re = Regex::new(r"^[a-zA-Z0-9_/.\-]+$").unwrap();
+        for (agent, policy) in &self.agents {
+            for tool in policy.allowed_tools.iter().flatten().chain(&policy.denied_tools) {
+                if !tool_name_re.is_match(tool) {
+                    return Err(anyhow::anyhow!(
+                        "agent '{}': invalid tool name '{}'",
+                        agent,
+                        tool
+                    ));
+                }
+            }
         }
 
         // Validate agent upstream references exist in upstreams map

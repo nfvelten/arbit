@@ -20,12 +20,50 @@ pub struct RateLimitMiddleware {
 
 impl RateLimitMiddleware {
     pub fn new(config: watch::Receiver<Arc<LiveConfig>>) -> Self {
-        Self {
-            config,
-            counts: Arc::new(Mutex::new(HashMap::new())),
-            tool_counts: Arc::new(Mutex::new(HashMap::new())),
-            ip_counts: Arc::new(Mutex::new(HashMap::new())),
+        let counts = Arc::new(Mutex::new(HashMap::new()));
+        let tool_counts = Arc::new(Mutex::new(HashMap::new()));
+        let ip_counts = Arc::new(Mutex::new(HashMap::new()));
+
+        // Background task: purge inactive entries every 5 minutes to prevent
+        // unbounded HashMap growth when many distinct agents/IPs are seen.
+        {
+            let counts = Arc::clone(&counts);
+            let tool_counts = Arc::clone(&tool_counts);
+            let ip_counts = Arc::clone(&ip_counts);
+            tokio::spawn(async move {
+                let mut interval =
+                    tokio::time::interval(Duration::from_secs(300));
+                interval.tick().await; // skip immediate tick
+                loop {
+                    interval.tick().await;
+                    let window = Duration::from_secs(60);
+                    let now = Instant::now();
+                    {
+                        let mut m = counts.lock().await;
+                        m.retain(|_, ts: &mut Vec<Instant>| {
+                            ts.retain(|t| now.duration_since(*t) < window);
+                            !ts.is_empty()
+                        });
+                    }
+                    {
+                        let mut m = tool_counts.lock().await;
+                        m.retain(|_, ts: &mut Vec<Instant>| {
+                            ts.retain(|t| now.duration_since(*t) < window);
+                            !ts.is_empty()
+                        });
+                    }
+                    {
+                        let mut m = ip_counts.lock().await;
+                        m.retain(|_, ts: &mut Vec<Instant>| {
+                            ts.retain(|t| now.duration_since(*t) < window);
+                            !ts.is_empty()
+                        });
+                    }
+                }
+            });
         }
+
+        Self { config, counts, tool_counts, ip_counts }
     }
 }
 

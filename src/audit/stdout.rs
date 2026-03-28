@@ -1,11 +1,12 @@
 use super::{AuditEntry, AuditLog, Outcome};
 use async_trait::async_trait;
+use std::sync::Arc;
 
 pub struct StdoutAudit;
 
 #[async_trait]
 impl AuditLog for StdoutAudit {
-    fn record(&self, entry: AuditEntry) {
+    fn record(&self, entry: Arc<AuditEntry>) {
         let tool = entry.tool.as_deref().unwrap_or("-");
         match &entry.outcome {
             Outcome::Allowed => tracing::info!(

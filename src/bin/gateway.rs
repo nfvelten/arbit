@@ -95,6 +95,7 @@ async fn main() -> anyhow::Result<()> {
                 .and_then(|m| m.modified().ok());
             let mut interval = tokio::time::interval(Duration::from_secs(30));
             interval.tick().await; // consume immediate first tick
+            let mut last_error: Option<std::time::Instant> = None;
 
             loop {
                 // Wait for either the polling interval or a SIGUSR1 signal.
@@ -108,7 +109,7 @@ async fn main() -> anyhow::Result<()> {
                     };
                     if matches!(trigger, Trigger::Signal) {
                         tracing::info!("SIGUSR1 received, reloading config");
-                        do_reload(&reload_path, &tx);
+                        do_reload(&reload_path, &tx, &mut last_error);
                         last_modified = tokio::fs::metadata(&reload_path)
                             .await
                             .ok()
@@ -125,7 +126,7 @@ async fn main() -> anyhow::Result<()> {
                     .and_then(|m| m.modified().ok());
                 if modified.is_some() && modified != last_modified {
                     last_modified = modified;
-                    do_reload(&reload_path, &tx);
+                    do_reload(&reload_path, &tx, &mut last_error);
                 }
             }
         });
@@ -175,7 +176,7 @@ async fn main() -> anyhow::Result<()> {
                 Arc::clone(&metrics),
                 config_rx.clone(),
             ));
-            HttpTransport::new(addr, session_ttl_secs, tls, metrics, config_rx, jwt, sqlite_db_path)
+            HttpTransport::new(addr, session_ttl_secs, tls, metrics, config_rx, jwt, sqlite_db_path, config.admin_token)
                 .serve(gateway)
                 .await?;
         }
@@ -215,9 +216,11 @@ fn build_audit_backend(cfg: &AuditConfig) -> anyhow::Result<Arc<dyn AuditLog>> {
 fn do_reload(
     reload_path: &str,
     tx: &tokio::sync::watch::Sender<Arc<LiveConfig>>,
+    last_error: &mut Option<std::time::Instant>,
 ) {
     match Config::from_file(reload_path) {
         Ok(new_cfg) => {
+            *last_error = None;
             let new_patterns: Vec<Regex> = new_cfg
                 .rules
                 .block_patterns
@@ -233,6 +236,17 @@ fn do_reload(
                 tracing::info!(path = reload_path, "config reloaded");
             }
         }
-        Err(e) => tracing::error!(error = %e, "config reload failed"),
+        Err(e) => {
+            // Throttle error logging to at most once every 5s to prevent log spam
+            // when the file is temporarily invalid (e.g. mid-write by an editor).
+            let now = std::time::Instant::now();
+            let should_log = last_error
+                .map(|t| now.duration_since(t).as_secs() >= 5)
+                .unwrap_or(true);
+            if should_log {
+                tracing::error!(error = %e, "config reload failed");
+                *last_error = Some(now);
+            }
+        }
     }
 }

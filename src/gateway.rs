@@ -65,13 +65,13 @@ impl McpGateway {
         let method = msg["method"].as_str().unwrap_or("");
 
         if method != "tools/call" {
-            self.audit.record(AuditEntry {
+            self.audit.record(Arc::new(AuditEntry {
                 ts: SystemTime::now(),
                 agent_id: agent_id.to_string(),
                 method: method.to_string(),
                 tool: None,
                 outcome: Outcome::Forwarded,
-            });
+            }));
             self.metrics.record(agent_id, "forwarded");
             return None;
         }
@@ -90,24 +90,24 @@ impl McpGateway {
 
         match self.pipeline.run(&ctx).await {
             Decision::Allow => {
-                self.audit.record(AuditEntry {
+                self.audit.record(Arc::new(AuditEntry {
                     ts: SystemTime::now(),
                     agent_id: agent_id.to_string(),
                     method: method.to_string(),
                     tool: tool_name,
                     outcome: Outcome::Allowed,
-                });
+                }));
                 self.metrics.record(agent_id, "allowed");
                 None
             }
             Decision::Block { reason } => {
-                self.audit.record(AuditEntry {
+                self.audit.record(Arc::new(AuditEntry {
                     ts: SystemTime::now(),
                     agent_id: agent_id.to_string(),
                     method: method.to_string(),
                     tool: tool_name,
                     outcome: Outcome::Blocked(reason.clone()),
-                });
+                }));
                 self.metrics.record(agent_id, "blocked");
                 Some(json!({
                     "jsonrpc": "2.0",
@@ -173,7 +173,7 @@ impl McpGateway {
             if cfg.block_patterns.is_empty() {
                 return response;
             }
-            cfg.block_patterns.iter().cloned().collect::<Vec<_>>()
+            Arc::clone(&cfg.block_patterns)
         };
 
         let (filtered, redacted) = redact_value(response, &patterns);

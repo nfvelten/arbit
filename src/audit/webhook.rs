@@ -7,7 +7,7 @@ use std::time::SystemTime;
 use tokio::sync::mpsc;
 
 pub struct WebhookAudit {
-    tx: Arc<Mutex<Option<mpsc::UnboundedSender<AuditEntry>>>>,
+    tx: Arc<Mutex<Option<mpsc::UnboundedSender<Arc<AuditEntry>>>>>,
     handle: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
 }
 
@@ -15,7 +15,7 @@ impl WebhookAudit {
     pub fn new(url: impl Into<String>, token: Option<String>) -> Self {
         let url = url.into();
         let client = Client::new();
-        let (tx, mut rx) = mpsc::unbounded_channel::<AuditEntry>();
+        let (tx, mut rx) = mpsc::unbounded_channel::<Arc<AuditEntry>>();
 
         let handle = tokio::spawn(async move {
             while let Some(entry) = rx.recv().await {
@@ -60,7 +60,7 @@ impl WebhookAudit {
 
 #[async_trait]
 impl AuditLog for WebhookAudit {
-    fn record(&self, entry: AuditEntry) {
+    fn record(&self, entry: Arc<AuditEntry>) {
         if let Ok(guard) = self.tx.lock() {
             if let Some(tx) = guard.as_ref() {
                 let _ = tx.send(entry);

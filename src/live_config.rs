@@ -1,13 +1,15 @@
 use crate::config::AgentPolicy;
 use regex::Regex;
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 /// Hot-reloadable configuration snapshot.
 /// Wrapped in `Arc` and broadcast via `tokio::sync::watch`.
 /// All consumers (`borrow()`) always see the latest reloaded version.
 pub struct LiveConfig {
     pub agents: HashMap<String, AgentPolicy>,
-    pub block_patterns: Vec<Regex>,
+    /// Block patterns shared via `Arc` — cheap to snapshot in middleware without cloning
+    /// each `Regex`. The inner `Vec` is immutable once constructed.
+    pub block_patterns: Arc<Vec<Regex>>,
     /// Reverse map: api_key → agent_name.
     /// Used for key-based agent identity on `initialize`.
     pub api_keys: HashMap<String, String>,
@@ -25,6 +27,11 @@ impl LiveConfig {
             .iter()
             .filter_map(|(name, p)| p.api_key.as_ref().map(|k| (k.clone(), name.clone())))
             .collect();
-        Self { agents, block_patterns, api_keys, ip_rate_limit }
+        Self {
+            agents,
+            block_patterns: Arc::new(block_patterns),
+            api_keys,
+            ip_rate_limit,
+        }
     }
 }
