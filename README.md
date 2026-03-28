@@ -192,8 +192,20 @@ agents:
 
 | Field | Description |
 |---|---|
-| `block_patterns` | List of regex patterns. Any `tools/call` whose arguments **or upstream response** matches is blocked. |
+| `block_patterns` | List of regex patterns applied to `tools/call` arguments and upstream responses. |
+| `filter_mode` | `block` (default) or `redact`. In `redact` mode, matching values in arguments are scrubbed to `[REDACTED]` and the sanitised request is forwarded instead of being rejected. Responses are always scrubbed regardless of this setting. |
+| `block_prompt_injection` | `true` to enable built-in prompt injection detection (7 patterns). Matched requests are always blocked, even in `redact` mode. Default: `false`. |
 | `ip_rate_limit` | Max `tools/call` requests per minute per client IP. Applied before per-agent limits. Optional. |
+
+```yaml
+rules:
+  block_patterns:
+    - "password"
+    - "api_key"
+  filter_mode: redact          # scrub instead of block
+  block_prompt_injection: true # detect "ignore previous instructions" etc.
+  ip_rate_limit: 100
+```
 
 Config changes to `agents` and `rules` are picked up automatically — no restart required.
 
@@ -455,7 +467,7 @@ Each middleware is a trait object — new checks can be added without touching t
 ## Tests
 
 ```sh
-# Unit tests (85 tests)
+# Unit tests (103 tests)
 cargo test
 
 # HTTP integration tests (35 checks)

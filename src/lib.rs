@@ -7,3 +7,4 @@ pub mod metrics;
 pub mod middleware;
 pub mod transport;
 pub mod upstream;
+pub mod prompt_injection;

@@ -690,7 +690,7 @@ async fn resolve_agent(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::live_config::LiveConfig;
+    use crate::{config::FilterMode, live_config::LiveConfig};
     use regex::Regex;
     use std::collections::HashMap;
 
@@ -822,13 +822,13 @@ mod tests {
     // ── parse_and_filter_sse ─────────────────────────────────────────────────
 
     fn empty_config_rx() -> watch::Receiver<Arc<LiveConfig>> {
-        let (_, rx) = watch::channel(Arc::new(LiveConfig::new(HashMap::new(), vec![], None)));
+        let (_, rx) = watch::channel(Arc::new(LiveConfig::new(HashMap::new(), vec![], vec![], None, FilterMode::Block)));
         rx
     }
 
     fn config_rx_with_pattern(pattern: &str) -> watch::Receiver<Arc<LiveConfig>> {
         let re = Regex::new(pattern).unwrap();
-        let (_, rx) = watch::channel(Arc::new(LiveConfig::new(HashMap::new(), vec![re], None)));
+        let (_, rx) = watch::channel(Arc::new(LiveConfig::new(HashMap::new(), vec![re], vec![], None, FilterMode::Block)));
         rx
     }
 

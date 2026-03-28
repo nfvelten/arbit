@@ -4,6 +4,7 @@ use mcp_gateway::{
         AuditLog,
     },
     config::{AuditConfig, Config, TransportConfig},
+    prompt_injection,
     gateway::McpGateway,
     jwt::JwtValidator,
     live_config::LiveConfig,
@@ -75,7 +76,23 @@ async fn main() -> anyhow::Result<()> {
         .map(|p| Regex::new(p).unwrap_or_else(|_| panic!("invalid regex: {p}")))
         .collect();
 
-    let live = Arc::new(LiveConfig::new(config.agents, block_patterns, config.rules.ip_rate_limit));
+    let injection_patterns: Vec<Regex> = if config.rules.block_prompt_injection {
+        tracing::info!("prompt injection detection enabled ({} patterns)", prompt_injection::PATTERNS.len());
+        prompt_injection::PATTERNS
+            .iter()
+            .map(|p| Regex::new(p).unwrap_or_else(|_| panic!("invalid injection regex: {p}")))
+            .collect()
+    } else {
+        vec![]
+    };
+
+    let live = Arc::new(LiveConfig::new(
+        config.agents,
+        block_patterns,
+        injection_patterns,
+        config.rules.ip_rate_limit,
+        config.rules.filter_mode,
+    ));
     let (config_tx, config_rx) = watch::channel(live);
 
     // ── Hot-reload — SIGUSR1 for immediate reload, polls every 30s as fallback ──
@@ -231,7 +248,21 @@ fn do_reload(
                         .ok()
                 })
                 .collect();
-            let new_live = Arc::new(LiveConfig::new(new_cfg.agents, new_patterns, new_cfg.rules.ip_rate_limit));
+            let new_injection: Vec<Regex> = if new_cfg.rules.block_prompt_injection {
+                prompt_injection::PATTERNS
+                    .iter()
+                    .filter_map(|p| Regex::new(p).ok())
+                    .collect()
+            } else {
+                vec![]
+            };
+            let new_live = Arc::new(LiveConfig::new(
+                new_cfg.agents,
+                new_patterns,
+                new_injection,
+                new_cfg.rules.ip_rate_limit,
+                new_cfg.rules.filter_mode,
+            ));
             if tx.send(new_live).is_ok() {
                 tracing::info!(path = reload_path, "config reloaded");
             }

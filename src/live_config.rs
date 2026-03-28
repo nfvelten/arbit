@@ -1,4 +1,4 @@
-use crate::config::AgentPolicy;
+use crate::config::{AgentPolicy, FilterMode};
 use regex::Regex;
 use std::{collections::HashMap, sync::Arc};
 
@@ -10,11 +10,15 @@ pub struct LiveConfig {
     /// Block patterns shared via `Arc` — cheap to snapshot in middleware without cloning
     /// each `Regex`. The inner `Vec` is immutable once constructed.
     pub block_patterns: Arc<Vec<Regex>>,
+    /// Built-in prompt injection patterns. Non-empty when `rules.block_prompt_injection: true`.
+    pub injection_patterns: Arc<Vec<Regex>>,
     /// Reverse map: api_key → agent_name.
     /// Used for key-based agent identity on `initialize`.
     pub api_keys: HashMap<String, String>,
     /// Max requests per minute per IP (HTTP mode). None = unlimited.
     pub ip_rate_limit: Option<usize>,
+    /// How to handle block_pattern matches on requests (block vs redact).
+    pub filter_mode: FilterMode,
 }
 
 #[cfg(test)]
@@ -50,7 +54,7 @@ mod tests {
         let mut agents = HashMap::new();
         agents.insert("cursor".to_string(), policy_with_key("key-cursor"));
         agents.insert("claude".to_string(), policy_with_key("key-claude"));
-        let live = LiveConfig::new(agents, vec![], None);
+        let live = LiveConfig::new(agents, vec![], vec![], None, FilterMode::Block);
         assert_eq!(live.api_keys.get("key-cursor").map(String::as_str), Some("cursor"));
         assert_eq!(live.api_keys.get("key-claude").map(String::as_str), Some("claude"));
         assert_eq!(live.api_keys.len(), 2);
@@ -60,7 +64,7 @@ mod tests {
     fn agent_without_api_key_not_in_map() {
         let mut agents = HashMap::new();
         agents.insert("anon".to_string(), policy_no_key());
-        let live = LiveConfig::new(agents, vec![], None);
+        let live = LiveConfig::new(agents, vec![], vec![], None, FilterMode::Block);
         assert!(live.api_keys.is_empty());
     }
 
@@ -69,7 +73,7 @@ mod tests {
         let mut agents = HashMap::new();
         agents.insert("keyed".to_string(), policy_with_key("k1"));
         agents.insert("open".to_string(), policy_no_key());
-        let live = LiveConfig::new(agents, vec![], None);
+        let live = LiveConfig::new(agents, vec![], vec![], None, FilterMode::Block);
         assert_eq!(live.api_keys.len(), 1);
         assert!(live.api_keys.contains_key("k1"));
     }
@@ -77,7 +81,7 @@ mod tests {
     #[test]
     fn block_patterns_stored_in_arc() {
         let re = regex::Regex::new("secret").unwrap();
-        let live = LiveConfig::new(HashMap::new(), vec![re], None);
+        let live = LiveConfig::new(HashMap::new(), vec![re], vec![], None, FilterMode::Block);
         assert_eq!(live.block_patterns.len(), 1);
         // Arc::strong_count confirms it's wrapped
         assert_eq!(Arc::strong_count(&live.block_patterns), 1);
@@ -85,10 +89,26 @@ mod tests {
 
     #[test]
     fn ip_rate_limit_preserved() {
-        let live = LiveConfig::new(HashMap::new(), vec![], Some(100));
+        let live = LiveConfig::new(HashMap::new(), vec![], vec![], Some(100), FilterMode::Block);
         assert_eq!(live.ip_rate_limit, Some(100));
-        let live2 = LiveConfig::new(HashMap::new(), vec![], None);
+        let live2 = LiveConfig::new(HashMap::new(), vec![], vec![], None, FilterMode::Block);
         assert_eq!(live2.ip_rate_limit, None);
+    }
+
+    #[test]
+    fn injection_patterns_stored_in_arc() {
+        let re = regex::Regex::new("ignore.*instructions").unwrap();
+        let live = LiveConfig::new(HashMap::new(), vec![], vec![re], None, FilterMode::Block);
+        assert_eq!(live.injection_patterns.len(), 1);
+        assert_eq!(Arc::strong_count(&live.injection_patterns), 1);
+    }
+
+    #[test]
+    fn filter_mode_preserved() {
+        let live = LiveConfig::new(HashMap::new(), vec![], vec![], None, FilterMode::Redact);
+        assert_eq!(live.filter_mode, FilterMode::Redact);
+        let live2 = LiveConfig::new(HashMap::new(), vec![], vec![], None, FilterMode::Block);
+        assert_eq!(live2.filter_mode, FilterMode::Block);
     }
 }
 
@@ -96,7 +116,9 @@ impl LiveConfig {
     pub fn new(
         agents: HashMap<String, AgentPolicy>,
         block_patterns: Vec<Regex>,
+        injection_patterns: Vec<Regex>,
         ip_rate_limit: Option<usize>,
+        filter_mode: FilterMode,
     ) -> Self {
         let api_keys = agents
             .iter()
@@ -105,8 +127,10 @@ impl LiveConfig {
         Self {
             agents,
             block_patterns: Arc::new(block_patterns),
+            injection_patterns: Arc::new(injection_patterns),
             api_keys,
             ip_rate_limit,
+            filter_mode,
         }
     }
 }

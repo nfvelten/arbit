@@ -7,11 +7,11 @@ use tokio::sync::watch;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::make_agent;
+    use crate::config::{FilterMode, make_agent};
     use std::collections::HashMap;
 
     fn make_mw(agents: HashMap<String, crate::config::AgentPolicy>) -> AuthMiddleware {
-        let live = Arc::new(LiveConfig::new(agents, vec![], None));
+        let live = Arc::new(LiveConfig::new(agents, vec![], vec![], None, FilterMode::Block));
         let (_, rx) = watch::channel(live);
         AuthMiddleware::new(rx)
     }

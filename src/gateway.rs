@@ -1,5 +1,6 @@
 use crate::{
     audit::{AuditEntry, AuditLog, Outcome},
+    config::FilterMode,
     live_config::LiveConfig,
     metrics::GatewayMetrics,
     middleware::{Decision, McpContext, Pipeline, RateLimitInfo},
@@ -139,6 +140,20 @@ impl McpGateway {
             return (Some(err), rl);
         }
 
+        // In Redact mode, scrub block_patterns from the request arguments before forwarding.
+        // Injection patterns are always blocked upstream — if we reach here they didn't match.
+        let msg = {
+            let (patterns, filter_mode) = {
+                let cfg = self.config.borrow();
+                (Arc::clone(&cfg.block_patterns), cfg.filter_mode)
+            };
+            if filter_mode == FilterMode::Redact && !patterns.is_empty() {
+                scrub_request_args(msg, &patterns)
+            } else {
+                msg
+            }
+        };
+
         let response = self.upstream_for(agent_id).forward(&msg).await;
         let response = if method == "tools/list" {
             response.map(|r| self.filter_tools_response(agent_id, r))
@@ -195,6 +210,21 @@ impl McpGateway {
     }
 }
 
+/// In Redact mode, scrub block_patterns from `params.arguments` before forwarding.
+/// Returns the message with sensitive argument values replaced by `"[REDACTED]"`.
+fn scrub_request_args(mut msg: Value, patterns: &[regex::Regex]) -> Value {
+    if let Some(args) = msg.pointer("/params/arguments").cloned() {
+        let (redacted, changed) = redact_value(args, patterns);
+        if changed {
+            tracing::info!("sensitive data scrubbed from request arguments (redact mode)");
+            if let Some(target) = msg.pointer_mut("/params/arguments") {
+                *target = redacted;
+            }
+        }
+    }
+    msg
+}
+
 /// Recursively walk a JSON value. Any `String` leaf that matches a block pattern
 /// is replaced with the literal string `"[REDACTED]"`. Returns the filtered value
 /// and a flag indicating whether anything was redacted.
@@ -240,7 +270,7 @@ mod tests {
     use super::*;
     use crate::{
         audit::{AuditEntry, AuditLog},
-        config::{AgentPolicy, make_agent},
+        config::{AgentPolicy, FilterMode, make_agent},
         live_config::LiveConfig,
         metrics::GatewayMetrics,
         middleware::Pipeline,
@@ -267,7 +297,7 @@ mod tests {
     }
 
     fn make_gw(agents: HashMap<String, AgentPolicy>, patterns: Vec<Regex>) -> McpGateway {
-        let live = Arc::new(LiveConfig::new(agents, patterns, None));
+        let live = Arc::new(LiveConfig::new(agents, patterns, vec![], None, FilterMode::Block));
         let (_, rx) = watch::channel(live);
         McpGateway::new(
             Pipeline::new(),
@@ -385,5 +415,52 @@ mod tests {
             .map(|t| t["name"].as_str().unwrap())
             .collect();
         assert_eq!(names, vec!["read_file"]);
+    }
+
+    // ── scrub_request_args ────────────────────────────────────────────────────
+
+    #[test]
+    fn scrub_request_args_replaces_matching_value() {
+        let re = Regex::new("secret").unwrap();
+        let msg = json!({
+            "method": "tools/call",
+            "params": {"name": "echo", "arguments": {"input": "my secret key"}}
+        });
+        let out = scrub_request_args(msg, &[re]);
+        assert_eq!(out["params"]["arguments"]["input"], json!("[REDACTED]"));
+    }
+
+    #[test]
+    fn scrub_request_args_leaves_non_matching_values() {
+        let re = Regex::new("secret").unwrap();
+        let msg = json!({
+            "method": "tools/call",
+            "params": {"name": "echo", "arguments": {"input": "harmless"}}
+        });
+        let out = scrub_request_args(msg.clone(), &[re]);
+        assert_eq!(out["params"]["arguments"]["input"], json!("harmless"));
+    }
+
+    #[test]
+    fn scrub_request_args_no_arguments_unchanged() {
+        let re = Regex::new("secret").unwrap();
+        let msg = json!({"method": "tools/call", "params": {"name": "echo"}});
+        let out = scrub_request_args(msg.clone(), &[re]);
+        assert_eq!(out, msg);
+    }
+
+    #[test]
+    fn scrub_request_args_nested_object_scrubbed() {
+        let re = Regex::new("password").unwrap();
+        let msg = json!({
+            "method": "tools/call",
+            "params": {
+                "name": "login",
+                "arguments": {"user": "alice", "creds": "password=hunter2"}
+            }
+        });
+        let out = scrub_request_args(msg, &[re]);
+        assert_eq!(out["params"]["arguments"]["user"], json!("alice"));
+        assert_eq!(out["params"]["arguments"]["creds"], json!("[REDACTED]"));
     }
 }

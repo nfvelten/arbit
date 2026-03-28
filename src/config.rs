@@ -173,6 +173,17 @@ fn default_agent_claim() -> String {
 
 // ── Rules ─────────────────────────────────────────────────────────────────────
 
+/// Controls what happens when a `tools/call` argument matches a `block_pattern`.
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum FilterMode {
+    /// Reject the request with an error (default).
+    #[default]
+    Block,
+    /// Scrub matching values from the arguments and allow the sanitised request through.
+    Redact,
+}
+
 #[derive(Debug, Deserialize, Default)]
 pub struct Rules {
     #[serde(default)]
@@ -180,6 +191,15 @@ pub struct Rules {
     /// Maximum requests per minute from a single IP address (HTTP mode only).
     /// Applies before per-agent limits. None = no IP-based limit.
     pub ip_rate_limit: Option<usize>,
+    /// Enable built-in prompt injection detection. Matched requests are always blocked,
+    /// regardless of `filter_mode`. Default: false.
+    #[serde(default)]
+    pub block_prompt_injection: bool,
+    /// How to handle `tools/call` arguments that match `block_patterns`.
+    /// `block` (default): reject the request with an error.
+    /// `redact`: scrub matching values and allow the sanitised request.
+    #[serde(default)]
+    pub filter_mode: FilterMode,
 }
 
 #[cfg(test)]

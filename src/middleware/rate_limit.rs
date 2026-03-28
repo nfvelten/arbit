@@ -11,7 +11,7 @@ use tokio::sync::{watch, Mutex};
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::AgentPolicy;
+    use crate::config::{AgentPolicy, FilterMode};
 
     fn policy(rate_limit: usize) -> AgentPolicy {
         AgentPolicy {
@@ -25,7 +25,7 @@ mod tests {
     }
 
     fn make_mw(agents: HashMap<String, AgentPolicy>, ip_limit: Option<usize>) -> RateLimitMiddleware {
-        let live = Arc::new(LiveConfig::new(agents, vec![], ip_limit));
+        let live = Arc::new(LiveConfig::new(agents, vec![], vec![], ip_limit, FilterMode::Block));
         let (_, rx) = watch::channel(live);
         RateLimitMiddleware::new(rx)
     }
