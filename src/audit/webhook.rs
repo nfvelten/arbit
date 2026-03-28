@@ -46,7 +46,7 @@ impl WebhookAudit {
                 }
 
                 if let Err(e) = req.send().await {
-                    eprintln!("[WEBHOOK] delivery failed: {e}");
+                    tracing::warn!(error = %e, "webhook delivery failed");
                 }
             }
         });

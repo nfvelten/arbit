@@ -71,14 +71,14 @@ impl Transport for StdioTransport {
             let msg: Value = match serde_json::from_str(&line) {
                 Ok(v) => v,
                 Err(e) => {
-                    eprintln!("[GATEWAY] invalid message ignored: {e}");
+                    tracing::warn!(error = %e, "invalid message ignored");
                     continue;
                 }
             };
 
             if msg["method"].as_str() == Some("initialize") {
                 if let Some(name) = msg["params"]["clientInfo"]["name"].as_str() {
-                    eprintln!("[GATEWAY] agent identified: {name}");
+                    tracing::info!(agent = name, "agent identified");
                     *agent_id.lock().await = name.to_string();
                 }
             }

@@ -42,7 +42,7 @@ impl CircuitBreaker {
             CbState::Open { until } => {
                 if Instant::now() >= *until {
                     *state = CbState::HalfOpen;
-                    eprintln!("[CIRCUIT] entering half-open, probing upstream");
+                    tracing::info!("circuit entering half-open, probing upstream");
                     false
                 } else {
                     true
@@ -55,7 +55,7 @@ impl CircuitBreaker {
         let prev = self.failure_count.swap(0, Ordering::Relaxed);
         let mut state = self.state.lock().await;
         if !matches!(*state, CbState::Closed) {
-            eprintln!("[CIRCUIT] upstream recovered, circuit closed (was {prev} failures)");
+            tracing::info!(previous_failures = prev, "upstream recovered, circuit closed");
             *state = CbState::Closed;
         }
     }
@@ -67,10 +67,7 @@ impl CircuitBreaker {
             let until = Instant::now() + Duration::from_secs(self.recovery_secs);
             *state = CbState::Open { until };
             self.failure_count.store(0, Ordering::Relaxed);
-            eprintln!(
-                "[CIRCUIT] upstream circuit opened after {count} failures, retry in {}s",
-                self.recovery_secs
-            );
+            tracing::warn!(failures = count, recovery_secs = self.recovery_secs, "circuit opened");
         }
     }
 }
@@ -110,7 +107,7 @@ impl HttpUpstream {
 impl McpUpstream for HttpUpstream {
     async fn forward(&self, msg: &Value) -> Option<Value> {
         if self.cb.is_open().await {
-            eprintln!("[UPSTREAM] circuit open, rejecting request");
+            tracing::warn!("circuit open, rejecting request");
             return Some(json!({
                 "jsonrpc": "2.0",
                 "error": { "code": -32603, "message": "service unavailable (circuit open)" }
@@ -126,7 +123,7 @@ impl McpUpstream for HttpUpstream {
                 match resp.json::<Value>().await {
                     Ok(body) => Some(body),
                     Err(e) => {
-                        eprintln!("[UPSTREAM] failed to parse response: {e}");
+                        tracing::warn!(error = %e, "failed to parse upstream response");
                         Some(json!({
                             "jsonrpc": "2.0",
                             "error": { "code": -32603, "message": "internal error" }
@@ -135,7 +132,7 @@ impl McpUpstream for HttpUpstream {
                 }
             }
             Err(e) => {
-                eprintln!("[UPSTREAM] request failed: {e}");
+                tracing::error!(error = %e, "upstream request failed");
                 self.cb.on_failure().await;
                 Some(json!({
                     "jsonrpc": "2.0",

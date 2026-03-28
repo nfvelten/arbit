@@ -167,7 +167,7 @@ impl McpGateway {
         let text = response.to_string();
         for pattern in &patterns {
             if pattern.is_match(&text) {
-                eprintln!("[RESPONSE_FILTER] blocked sensitive data in response (pattern: {})", pattern.as_str());
+                tracing::info!(pattern = pattern.as_str(), "response blocked: sensitive data detected");
                 return json!({
                     "jsonrpc": "2.0",
                     "id": response["id"],

@@ -50,22 +50,23 @@ impl SqliteAudit {
                 };
 
                 match &entry.outcome {
-                    Outcome::Allowed => eprintln!(
-                        "[ALLOWED] agent={} method={} tool={}",
-                        entry.agent_id,
-                        entry.method,
-                        entry.tool.as_deref().unwrap_or("-")
+                    Outcome::Allowed => tracing::info!(
+                        outcome = "allowed",
+                        agent = %entry.agent_id,
+                        method = %entry.method,
+                        tool = entry.tool.as_deref().unwrap_or("-"),
                     ),
-                    Outcome::Blocked(r) => eprintln!(
-                        "[BLOCKED] agent={} method={} tool={} reason={}",
-                        entry.agent_id,
-                        entry.method,
-                        entry.tool.as_deref().unwrap_or("-"),
-                        r
+                    Outcome::Blocked(r) => tracing::info!(
+                        outcome = "blocked",
+                        agent = %entry.agent_id,
+                        method = %entry.method,
+                        tool = entry.tool.as_deref().unwrap_or("-"),
+                        reason = %r,
                     ),
-                    Outcome::Forwarded => eprintln!(
-                        "[PASS]    agent={} method={}",
-                        entry.agent_id, entry.method
+                    Outcome::Forwarded => tracing::info!(
+                        outcome = "forwarded",
+                        agent = %entry.agent_id,
+                        method = %entry.method,
                     ),
                 }
 

@@ -17,9 +17,22 @@ use mcp_gateway::{
 use regex::Regex;
 use std::{collections::HashMap, sync::Arc, time::Duration};
 use tokio::sync::watch;
+use tracing_subscriber::{fmt, EnvFilter};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // ── Logging ────────────────────────────────────────────────────────────────
+    // LOG_FORMAT=json  → structured JSON (production)
+    // LOG_FORMAT=<anything else> or unset → human-readable (default)
+    // LOG_LEVEL overrides the default "info" level (e.g. LOG_LEVEL=debug)
+    let filter = EnvFilter::try_from_env("LOG_LEVEL")
+        .unwrap_or_else(|_| EnvFilter::new("info"));
+    if std::env::var("LOG_FORMAT").as_deref() == Ok("json") {
+        fmt().json().with_env_filter(filter).init();
+    } else {
+        fmt().with_env_filter(filter).init();
+    }
+
     let config_path = std::env::args().nth(1).unwrap_or_else(|| "gateway.yml".into());
     let config = Config::from_file(&config_path)?;
 
@@ -85,7 +98,7 @@ async fn main() -> anyhow::Result<()> {
                         _ = sigusr1.recv() => Trigger::Signal,
                     };
                     if matches!(trigger, Trigger::Signal) {
-                        eprintln!("[GATEWAY] SIGUSR1 received, reloading config...");
+                        tracing::info!("SIGUSR1 received, reloading config");
                         do_reload(&reload_path, &tx);
                         last_modified = tokio::fs::metadata(&reload_path)
                             .await
@@ -129,7 +142,7 @@ async fn main() -> anyhow::Result<()> {
 
     match config.transport {
         TransportConfig::Http { addr, upstream, session_ttl_secs, tls, circuit_breaker } => {
-            eprintln!("[GATEWAY] HTTP mode | upstream={upstream} | addr={addr}");
+            tracing::info!(upstream, addr, "HTTP mode");
             let default_upstream = Arc::new(HttpUpstream::with_circuit_breaker(
                 &upstream,
                 circuit_breaker.threshold,
@@ -148,7 +161,7 @@ async fn main() -> anyhow::Result<()> {
                 .await?;
         }
         TransportConfig::Stdio { server } => {
-            eprintln!("[GATEWAY] stdio mode | server={}", server.join(" "));
+            tracing::info!(server = %server.join(" "), "stdio mode");
             let gateway = Arc::new(McpGateway::new(
                 pipeline,
                 Arc::new(HttpUpstream::new("")), // not used in stdio mode
@@ -170,11 +183,11 @@ fn build_audit_backend(cfg: &AuditConfig) -> anyhow::Result<Arc<dyn AuditLog>> {
     match cfg {
         AuditConfig::Stdout => Ok(Arc::new(StdoutAudit)),
         AuditConfig::Sqlite { path, max_entries, max_age_days } => {
-            eprintln!("[GATEWAY] SQLite audit at {path}");
+            tracing::info!(path, "SQLite audit");
             Ok(Arc::new(SqliteAudit::with_rotation(path, *max_entries, *max_age_days)?))
         }
         AuditConfig::Webhook { url, token } => {
-            eprintln!("[GATEWAY] Webhook audit to {url}");
+            tracing::info!(url, "webhook audit");
             Ok(Arc::new(WebhookAudit::new(url, token.clone())))
         }
     }
@@ -192,15 +205,15 @@ fn do_reload(
                 .iter()
                 .filter_map(|p| {
                     Regex::new(p)
-                        .map_err(|e| eprintln!("[RELOAD] invalid regex '{p}': {e}"))
+                        .map_err(|e| tracing::warn!(pattern = p, error = %e, "invalid regex in reloaded config"))
                         .ok()
                 })
                 .collect();
             let new_live = Arc::new(LiveConfig::new(new_cfg.agents, new_patterns));
             if tx.send(new_live).is_ok() {
-                eprintln!("[GATEWAY] config reloaded from {reload_path}");
+                tracing::info!(path = reload_path, "config reloaded");
             }
         }
-        Err(e) => eprintln!("[GATEWAY] config reload failed: {e}"),
+        Err(e) => tracing::error!(error = %e, "config reload failed"),
     }
 }

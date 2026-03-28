@@ -107,10 +107,10 @@ impl Transport for HttpTransport {
             .with_state(state);
 
         if let Some(tls) = &self.tls {
-            eprintln!("[GATEWAY] HTTPS mode listening on https://{}", self.addr);
+            tracing::info!(addr = %self.addr, "HTTPS mode listening");
             serve_tls(app, &self.addr, &tls.cert, &tls.key).await
         } else {
-            eprintln!("[GATEWAY] HTTP mode listening on http://{}", self.addr);
+            tracing::info!(addr = %self.addr, "HTTP mode listening");
             let listener = tokio::net::TcpListener::bind(&self.addr).await?;
             axum::serve(listener, app)
                 .with_graceful_shutdown(shutdown_signal())
@@ -158,7 +158,7 @@ async fn shutdown_signal() {
     {
         tokio::signal::ctrl_c().await.ok();
     }
-    eprintln!("[GATEWAY] shutdown signal received, draining audit...");
+    tracing::info!("shutdown signal received, draining audit");
 }
 
 // ── Handlers ─────────────────────────────────────────────────────────────────
@@ -189,7 +189,7 @@ async fn handle_mcp(
                 match cfg.api_keys.get(provided_key) {
                     Some(name) => name.clone(),
                     None => {
-                        eprintln!("[AUTH] unknown api_key");
+                        tracing::warn!("unknown api_key");
                         return StatusCode::UNAUTHORIZED.into_response();
                     }
                 }
@@ -197,7 +197,7 @@ async fn handle_mcp(
                 // No key: use claimed name, but reject if the agent requires a key
                 if let Some(policy) = cfg.agents.get(claimed_name) {
                     if policy.api_key.is_some() {
-                        eprintln!("[AUTH] api_key required for agent={claimed_name}");
+                        tracing::warn!(agent = claimed_name, "api_key required but not provided");
                         return StatusCode::UNAUTHORIZED.into_response();
                     }
                 }
@@ -205,7 +205,7 @@ async fn handle_mcp(
             }
         };
         let session_id = state.sessions.create(agent_name.clone()).await;
-        eprintln!("[SESSION] created id={session_id} agent={agent_name}");
+        tracing::info!(session_id, agent = agent_name, "session created");
 
         return match state.gateway.handle(&agent_name, msg).await {
             Some(response) => {
@@ -237,7 +237,7 @@ async fn handle_delete_session(
         None => return StatusCode::BAD_REQUEST.into_response(),
     };
     if state.sessions.invalidate(&sid).await {
-        eprintln!("[SESSION] invalidated id={sid}");
+        tracing::info!(session_id = sid, "session invalidated");
         StatusCode::NO_CONTENT.into_response()
     } else {
         StatusCode::NOT_FOUND.into_response()
@@ -317,11 +317,11 @@ async fn sse_proxy(
     let resp = match resp {
         Ok(r) if r.status().is_success() => r,
         Ok(r) => {
-            eprintln!("[SSE] upstream returned {}", r.status());
+            tracing::warn!(status = %r.status(), "SSE upstream returned error");
             return StatusCode::BAD_GATEWAY.into_response();
         }
         Err(e) => {
-            eprintln!("[SSE] upstream connection failed: {e}");
+            tracing::error!(error = %e, "SSE upstream connection failed");
             return StatusCode::BAD_GATEWAY.into_response();
         }
     };
@@ -386,7 +386,7 @@ fn parse_and_filter_sse(
         let cfg = config_rx.borrow();
         for pattern in &cfg.block_patterns {
             if pattern.is_match(&data) {
-                eprintln!("[SSE_FILTER] blocked event (pattern: {})", pattern.as_str());
+                tracing::info!(pattern = pattern.as_str(), "SSE event blocked by filter");
                 return None; // drop the event
             }
         }
