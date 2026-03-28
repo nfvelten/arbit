@@ -300,7 +300,7 @@ echo "━━━ 16. response filtering — upstream leaks private_key ━━━"
 OUT=$(mcp_post "" '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"secret-dumper","version":"1.0.0"}}}')
 SD_SESSION=$(grep -i "mcp-session-id:" /tmp/mcp-headers.txt | awk '{print $2}' | tr -d '\r\n')
 OUT=$(mcp_post "$SD_SESSION" '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"secret_dump","arguments":{}}}')
-check        "response containing private_key blocked"  "$OUT" "blocked"
+check        "response redacts private_key"             "$OUT" "REDACTED"
 check_absent "raw private_key not forwarded to client"  "$OUT" "AAABBBCCC123"
 
 # ══ NEW: SSE endpoint ═════════════════════════════════════════════════════════

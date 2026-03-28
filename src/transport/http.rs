@@ -381,16 +381,18 @@ fn parse_and_filter_sse(
 
     let data = data_parts.join("\n");
 
-    // Apply block patterns to the event data
-    {
+    // Apply block patterns to the event data — replace matches with [REDACTED]
+    let data = {
         let cfg = config_rx.borrow();
+        let mut out = data;
         for pattern in &cfg.block_patterns {
-            if pattern.is_match(&data) {
-                tracing::info!(pattern = pattern.as_str(), "SSE event blocked by filter");
-                return None; // drop the event
+            if pattern.is_match(&out) {
+                tracing::info!(pattern = pattern.as_str(), "sensitive data redacted from SSE event");
+                out = pattern.replace_all(&out, "[REDACTED]").into_owned();
             }
         }
-    }
+        out
+    };
 
     Some(Event::default().event(event_type).data(data))
 }

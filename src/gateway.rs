@@ -153,7 +153,9 @@ impl McpGateway {
     }
 
     /// Applies block_patterns to an upstream response.
-    /// If the response body contains a sensitive pattern, returns a sanitized error instead.
+    /// Any JSON string value that contains a match is replaced entirely with `"[REDACTED]"`,
+    /// so the surrounding structure (keys, types, array indices) is preserved but the
+    /// sensitive value is not forwarded to the caller.
     /// Called by both HttpTransport (via `handle`) and StdioTransport (directly).
     pub fn filter_response(&self, response: Value) -> Value {
         let patterns = {
@@ -161,24 +163,53 @@ impl McpGateway {
             if cfg.block_patterns.is_empty() {
                 return response;
             }
-            cfg.block_patterns.iter().map(|r| r.clone()).collect::<Vec<_>>()
+            cfg.block_patterns.iter().cloned().collect::<Vec<_>>()
         };
 
-        let text = response.to_string();
-        for pattern in &patterns {
-            if pattern.is_match(&text) {
-                tracing::info!(pattern = pattern.as_str(), "response blocked: sensitive data detected");
-                return json!({
-                    "jsonrpc": "2.0",
-                    "id": response["id"],
-                    "error": {
-                        "code": -32603,
-                        "message": "response blocked: sensitive data detected"
-                    }
-                });
+        let (filtered, redacted) = redact_value(response, &patterns);
+        if redacted {
+            tracing::info!("sensitive data redacted from response");
+        }
+        filtered
+    }
+}
+
+/// Recursively walk a JSON value. Any `String` leaf that matches a block pattern
+/// is replaced with the literal string `"[REDACTED]"`. Returns the filtered value
+/// and a flag indicating whether anything was redacted.
+fn redact_value(val: Value, patterns: &[regex::Regex]) -> (Value, bool) {
+    match val {
+        Value::String(s) => {
+            if patterns.iter().any(|p| p.is_match(&s)) {
+                (Value::String("[REDACTED]".to_string()), true)
+            } else {
+                (Value::String(s), false)
             }
         }
-
-        response
+        Value::Array(arr) => {
+            let mut any = false;
+            let new_arr = arr
+                .into_iter()
+                .map(|v| {
+                    let (v, r) = redact_value(v, patterns);
+                    any |= r;
+                    v
+                })
+                .collect();
+            (Value::Array(new_arr), any)
+        }
+        Value::Object(obj) => {
+            let mut any = false;
+            let new_obj = obj
+                .into_iter()
+                .map(|(k, v)| {
+                    let (v, r) = redact_value(v, patterns);
+                    any |= r;
+                    (k, v)
+                })
+                .collect();
+            (Value::Object(new_obj), any)
+        }
+        other => (other, false),
     }
 }
