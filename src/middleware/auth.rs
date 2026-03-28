@@ -1,15 +1,16 @@
 use super::{Decision, McpContext, Middleware};
-use crate::config::AgentPolicy;
+use crate::live_config::LiveConfig;
 use async_trait::async_trait;
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
+use tokio::sync::watch;
 
 pub struct AuthMiddleware {
-    agents: Arc<HashMap<String, AgentPolicy>>,
+    config: watch::Receiver<Arc<LiveConfig>>,
 }
 
 impl AuthMiddleware {
-    pub fn new(agents: Arc<HashMap<String, AgentPolicy>>) -> Self {
-        Self { agents }
+    pub fn new(config: watch::Receiver<Arc<LiveConfig>>) -> Self {
+        Self { config }
     }
 }
 
@@ -25,8 +26,8 @@ impl Middleware for AuthMiddleware {
         }
 
         let tool = ctx.tool_name.as_deref().unwrap_or("");
-
-        let Some(policy) = self.agents.get(&ctx.agent_id) else {
+        let cfg = self.config.borrow();
+        let Some(policy) = cfg.agents.get(&ctx.agent_id) else {
             return Decision::Block {
                 reason: format!("unknown agent '{}'", ctx.agent_id),
             };

@@ -1,3 +1,4 @@
+pub mod fanout;
 pub mod sqlite;
 pub mod stdout;
 pub mod webhook;
@@ -5,6 +6,7 @@ pub mod webhook;
 use async_trait::async_trait;
 use std::time::SystemTime;
 
+#[derive(Clone)]
 pub struct AuditEntry {
     pub ts: SystemTime,
     pub agent_id: String,
@@ -13,6 +15,7 @@ pub struct AuditEntry {
     pub outcome: Outcome,
 }
 
+#[derive(Clone)]
 pub enum Outcome {
     Allowed,
     Blocked(String),

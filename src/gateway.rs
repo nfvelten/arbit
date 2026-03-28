@@ -1,12 +1,13 @@
 use crate::{
     audit::{AuditEntry, AuditLog, Outcome},
-    config::AgentPolicy,
+    live_config::LiveConfig,
     metrics::GatewayMetrics,
     middleware::{Decision, McpContext, Pipeline},
     upstream::McpUpstream,
 };
 use serde_json::{json, Value};
 use std::{collections::HashMap, sync::Arc, time::SystemTime};
+use tokio::sync::watch;
 
 pub struct McpGateway {
     pipeline: Pipeline,
@@ -16,8 +17,7 @@ pub struct McpGateway {
     named_upstreams: HashMap<String, Arc<dyn McpUpstream>>,
     audit: Arc<dyn AuditLog>,
     metrics: Arc<GatewayMetrics>,
-    /// Per-agent policies — used to filter tools/list responses.
-    policies: Arc<HashMap<String, AgentPolicy>>,
+    config: watch::Receiver<Arc<LiveConfig>>,
 }
 
 impl McpGateway {
@@ -27,18 +27,26 @@ impl McpGateway {
         named_upstreams: HashMap<String, Arc<dyn McpUpstream>>,
         audit: Arc<dyn AuditLog>,
         metrics: Arc<GatewayMetrics>,
-        policies: Arc<HashMap<String, AgentPolicy>>,
+        config: watch::Receiver<Arc<LiveConfig>>,
     ) -> Self {
-        Self { pipeline, default_upstream, named_upstreams, audit, metrics, policies }
+        Self { pipeline, default_upstream, named_upstreams, audit, metrics, config }
     }
 
     /// Select the upstream for a given agent. Falls back to the default.
     fn upstream_for(&self, agent_id: &str) -> &Arc<dyn McpUpstream> {
-        self.policies
-            .get(agent_id)
-            .and_then(|p| p.upstream.as_ref())
+        let upstream_name = {
+            let cfg = self.config.borrow();
+            cfg.agents.get(agent_id).and_then(|p| p.upstream.clone())
+        };
+        upstream_name
+            .as_ref()
             .and_then(|name| self.named_upstreams.get(name))
             .unwrap_or(&self.default_upstream)
+    }
+
+    /// Returns the upstream URL for an agent — used by the SSE proxy.
+    pub fn upstream_url_for(&self, agent_id: &str) -> String {
+        self.upstream_for(agent_id).base_url().to_string()
     }
 
     /// Check policy without forwarding.
@@ -100,7 +108,7 @@ impl McpGateway {
         }
     }
 
-    /// Policy check + upstream forwarding.
+    /// Policy check + upstream forwarding + response filtering.
     /// Used by HttpTransport.
     pub async fn handle(&self, agent_id: &str, msg: Value) -> Option<Value> {
         let method = msg["method"].as_str().unwrap_or("").to_string();
@@ -109,12 +117,13 @@ impl McpGateway {
             Some(err) => Some(err),
             None => {
                 let response = self.upstream_for(agent_id).forward(&msg).await;
-                // Filter tools/list so the agent only sees what it can call
-                if method == "tools/list" {
+                let response = if method == "tools/list" {
                     response.map(|r| self.filter_tools_response(agent_id, r))
                 } else {
                     response
-                }
+                };
+                // Apply response filtering — block responses containing sensitive data
+                response.map(|r| self.filter_response(r))
             }
         }
     }
@@ -122,7 +131,8 @@ impl McpGateway {
     /// Filters the tools list in a `tools/list` response according to agent policy.
     /// Called by both HttpTransport and StdioTransport.
     pub fn filter_tools_response(&self, agent_id: &str, mut response: Value) -> Value {
-        let Some(policy) = self.policies.get(agent_id) else {
+        let cfg = self.config.borrow();
+        let Some(policy) = cfg.agents.get(agent_id) else {
             return response;
         };
 
@@ -137,6 +147,35 @@ impl McpGateway {
                 }
                 true
             });
+        }
+
+        response
+    }
+
+    /// Applies block_patterns to an upstream response.
+    /// If the response body contains a sensitive pattern, returns a sanitized error instead.
+    fn filter_response(&self, response: Value) -> Value {
+        let patterns = {
+            let cfg = self.config.borrow();
+            if cfg.block_patterns.is_empty() {
+                return response;
+            }
+            cfg.block_patterns.iter().map(|r| r.clone()).collect::<Vec<_>>()
+        };
+
+        let text = response.to_string();
+        for pattern in &patterns {
+            if pattern.is_match(&text) {
+                eprintln!("[RESPONSE_FILTER] blocked sensitive data in response (pattern: {})", pattern.as_str());
+                return json!({
+                    "jsonrpc": "2.0",
+                    "id": response["id"],
+                    "error": {
+                        "code": -32603,
+                        "message": "response blocked: sensitive data detected"
+                    }
+                });
+            }
         }
 
         response

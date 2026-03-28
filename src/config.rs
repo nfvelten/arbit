@@ -5,8 +5,12 @@ use std::collections::HashMap;
 pub struct Config {
     #[serde(default)]
     pub transport: TransportConfig,
+    /// Single audit backend — kept for backward compatibility.
     #[serde(default)]
-    pub audit: AuditConfig,
+    pub audit: Option<AuditConfig>,
+    /// Multiple audit backends — fan-out to all of them simultaneously.
+    #[serde(default)]
+    pub audits: Vec<AuditConfig>,
     #[serde(default)]
     pub agents: HashMap<String, AgentPolicy>,
     #[serde(default)]
@@ -83,12 +87,6 @@ pub enum AuditConfig {
     },
 }
 
-impl Default for AuditConfig {
-    fn default() -> Self {
-        AuditConfig::Stdout
-    }
-}
-
 fn default_db_path() -> String {
     "gateway-audit.db".to_string()
 }
@@ -103,8 +101,13 @@ pub struct AgentPolicy {
     pub denied_tools: Vec<String>,
     #[serde(default = "default_rate_limit")]
     pub rate_limit: usize,
+    /// Per-tool rate limits (calls/min). Checked in addition to the global rate_limit.
+    #[serde(default)]
+    pub tool_rate_limits: HashMap<String, usize>,
     /// Named upstream to use for this agent. Falls back to the default upstream if unset.
     pub upstream: Option<String>,
+    /// Pre-shared API key. When set, the agent must send `X-Api-Key: <key>` on initialize.
+    pub api_key: Option<String>,
 }
 
 fn default_rate_limit() -> usize {

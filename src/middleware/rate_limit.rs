@@ -1,25 +1,27 @@
 use super::{Decision, McpContext, Middleware};
-use crate::config::AgentPolicy;
+use crate::live_config::LiveConfig;
 use async_trait::async_trait;
 use std::{
     collections::HashMap,
     sync::Arc,
     time::{Duration, Instant},
 };
-use tokio::sync::Mutex;
+use tokio::sync::{watch, Mutex};
 
 pub struct RateLimitMiddleware {
-    /// Per-agent limit (calls/min)
-    limits: HashMap<String, usize>,
-    /// Timestamps of calls within the 60s sliding window
+    config: watch::Receiver<Arc<LiveConfig>>,
+    /// Per-agent sliding window counters — keyed by agent_id.
     counts: Arc<Mutex<HashMap<String, Vec<Instant>>>>,
+    /// Per-(agent, tool) sliding window counters for tool_rate_limits.
+    tool_counts: Arc<Mutex<HashMap<(String, String), Vec<Instant>>>>,
 }
 
 impl RateLimitMiddleware {
-    pub fn new(agents: &HashMap<String, AgentPolicy>) -> Self {
+    pub fn new(config: watch::Receiver<Arc<LiveConfig>>) -> Self {
         Self {
-            limits: agents.iter().map(|(k, v)| (k.clone(), v.rate_limit)).collect(),
+            config,
             counts: Arc::new(Mutex::new(HashMap::new())),
+            tool_counts: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
@@ -35,28 +37,54 @@ impl Middleware for RateLimitMiddleware {
             return Decision::Allow;
         }
 
-        // Unknown agents are already blocked by AuthMiddleware
-        let Some(&limit) = self.limits.get(&ctx.agent_id) else {
-            return Decision::Allow;
+        let (global_limit, tool_limit) = {
+            let cfg = self.config.borrow();
+            let Some(policy) = cfg.agents.get(&ctx.agent_id) else {
+                return Decision::Allow; // unknown agents are blocked by AuthMiddleware
+            };
+            let tool_limit = ctx
+                .tool_name
+                .as_ref()
+                .and_then(|t| policy.tool_rate_limits.get(t).copied());
+            (policy.rate_limit, tool_limit)
         };
 
         let now = Instant::now();
         let window = Duration::from_secs(60);
 
-        let mut counts = self.counts.lock().await;
-        let ts = counts.entry(ctx.agent_id.clone()).or_default();
-        ts.retain(|t| now.duration_since(*t) < window);
+        // ── Global agent rate limit ────────────────────────────────────────────
+        {
+            let mut counts = self.counts.lock().await;
+            let ts = counts.entry(ctx.agent_id.clone()).or_default();
+            ts.retain(|t| now.duration_since(*t) < window);
 
-        if ts.len() >= limit {
-            return Decision::Block {
-                reason: format!("rate limit exceeded ({limit}/min)"),
-            };
+            if ts.len() >= global_limit {
+                return Decision::Block {
+                    reason: format!("rate limit exceeded ({global_limit}/min)"),
+                };
+            }
+            ts.push(now);
+            if ts.is_empty() {
+                counts.remove(&ctx.agent_id);
+            }
         }
-        ts.push(now);
 
-        // Remove the entry entirely when the window is empty to bound memory growth
-        if ts.is_empty() {
-            counts.remove(&ctx.agent_id);
+        // ── Per-tool rate limit ────────────────────────────────────────────────
+        if let (Some(limit), Some(tool)) = (tool_limit, ctx.tool_name.as_ref()) {
+            let key = (ctx.agent_id.clone(), tool.clone());
+            let mut tool_counts = self.tool_counts.lock().await;
+            let ts = tool_counts.entry(key.clone()).or_default();
+            ts.retain(|t| now.duration_since(*t) < window);
+
+            if ts.len() >= limit {
+                return Decision::Block {
+                    reason: format!("tool '{tool}' rate limit exceeded ({limit}/min)"),
+                };
+            }
+            ts.push(now);
+            if ts.is_empty() {
+                tool_counts.remove(&key);
+            }
         }
 
         Decision::Allow

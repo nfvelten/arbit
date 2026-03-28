@@ -1,14 +1,16 @@
 use super::{Decision, McpContext, Middleware};
+use crate::live_config::LiveConfig;
 use async_trait::async_trait;
-use regex::Regex;
+use std::sync::Arc;
+use tokio::sync::watch;
 
 pub struct PayloadFilterMiddleware {
-    patterns: Vec<Regex>,
+    config: watch::Receiver<Arc<LiveConfig>>,
 }
 
 impl PayloadFilterMiddleware {
-    pub fn new(patterns: Vec<Regex>) -> Self {
-        Self { patterns }
+    pub fn new(config: watch::Receiver<Arc<LiveConfig>>) -> Self {
+        Self { config }
     }
 }
 
@@ -19,7 +21,7 @@ impl Middleware for PayloadFilterMiddleware {
     }
 
     async fn check(&self, ctx: &McpContext) -> Decision {
-        if ctx.method != "tools/call" || self.patterns.is_empty() {
+        if ctx.method != "tools/call" {
             return Decision::Allow;
         }
 
@@ -28,10 +30,17 @@ impl Middleware for PayloadFilterMiddleware {
             None => return Decision::Allow,
         };
 
-        // Serialize once, reuse for all pattern checks
-        let text = args.to_string();
+        // Snapshot patterns — drop the borrow before serializing args
+        let patterns = {
+            let cfg = self.config.borrow();
+            if cfg.block_patterns.is_empty() {
+                return Decision::Allow;
+            }
+            cfg.block_patterns.iter().map(|r| r.clone()).collect::<Vec<_>>()
+        };
 
-        for pattern in &self.patterns {
+        let text = args.to_string();
+        for pattern in &patterns {
             if pattern.is_match(&text) {
                 return Decision::Block {
                     reason: format!("sensitive data detected (pattern: {})", pattern.as_str()),

@@ -1,5 +1,10 @@
 use super::Transport;
-use crate::{config::TlsConfig, gateway::McpGateway, metrics::GatewayMetrics};
+use crate::{
+    config::TlsConfig,
+    gateway::McpGateway,
+    live_config::LiveConfig,
+    metrics::GatewayMetrics,
+};
 use async_trait::async_trait;
 use axum::{
     extract::State,
@@ -8,9 +13,11 @@ use axum::{
     routing::{delete, get, post},
     Json, Router,
 };
+use axum::response::sse::{Event, KeepAlive, Sse};
+use futures_util::StreamExt;
 use serde_json::Value;
-use std::{collections::HashMap, sync::Arc, time::Instant};
-use tokio::sync::Mutex;
+use std::{collections::HashMap, convert::Infallible, sync::Arc, time::Instant};
+use tokio::sync::{watch, Mutex};
 use uuid::Uuid;
 
 // ── Session store ────────────────────────────────────────────────────────────
@@ -29,7 +36,6 @@ impl SessionStore {
     async fn create(&self, agent_id: String) -> String {
         let id = Uuid::new_v4().to_string();
         let mut sessions = self.sessions.lock().await;
-        // Purge expired sessions on every creation to bound memory usage
         let now = Instant::now();
         let ttl = self.ttl_secs;
         sessions.retain(|_, (_, created)| now.duration_since(*created).as_secs() < ttl);
@@ -58,6 +64,7 @@ pub struct HttpTransport {
     session_ttl_secs: u64,
     tls: Option<TlsConfig>,
     metrics: Arc<GatewayMetrics>,
+    config: watch::Receiver<Arc<LiveConfig>>,
 }
 
 impl HttpTransport {
@@ -66,8 +73,9 @@ impl HttpTransport {
         session_ttl_secs: u64,
         tls: Option<TlsConfig>,
         metrics: Arc<GatewayMetrics>,
+        config: watch::Receiver<Arc<LiveConfig>>,
     ) -> Self {
-        Self { addr: addr.into(), session_ttl_secs, tls, metrics }
+        Self { addr: addr.into(), session_ttl_secs, tls, metrics, config }
     }
 }
 
@@ -75,6 +83,7 @@ struct HttpState {
     gateway: Arc<McpGateway>,
     sessions: Arc<SessionStore>,
     metrics: Arc<GatewayMetrics>,
+    config: watch::Receiver<Arc<LiveConfig>>,
 }
 
 const MAX_AGENT_ID_LEN: usize = 128;
@@ -86,10 +95,12 @@ impl Transport for HttpTransport {
             gateway,
             sessions: Arc::new(SessionStore::new(self.session_ttl_secs)),
             metrics: Arc::clone(&self.metrics),
+            config: self.config.clone(),
         });
 
         let app = Router::new()
             .route("/mcp", post(handle_mcp))
+            .route("/mcp", get(handle_sse))
             .route("/mcp", delete(handle_delete_session))
             .route("/metrics", get(handle_metrics))
             .with_state(state);
@@ -158,7 +169,7 @@ async fn handle_mcp(
 ) -> impl IntoResponse {
     let method = msg["method"].as_str().unwrap_or("");
 
-    // initialize: create session and inject Mcp-Session-Id into response
+    // initialize: validate api_key, create session
     if method == "initialize" {
         let agent_name = msg["params"]["clientInfo"]["name"]
             .as_str()
@@ -166,6 +177,23 @@ async fn handle_mcp(
 
         if agent_name.len() > MAX_AGENT_ID_LEN {
             return StatusCode::BAD_REQUEST.into_response();
+        }
+
+        // API key validation — required when configured for this agent
+        {
+            let cfg = state.config.borrow();
+            if let Some(policy) = cfg.agents.get(agent_name) {
+                if let Some(expected_key) = &policy.api_key {
+                    let provided = headers
+                        .get("x-api-key")
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or("");
+                    if provided != expected_key {
+                        eprintln!("[AUTH] api_key mismatch for agent={agent_name}");
+                        return StatusCode::UNAUTHORIZED.into_response();
+                    }
+                }
+            }
         }
 
         let agent_name = agent_name.to_string();
@@ -184,8 +212,6 @@ async fn handle_mcp(
         };
     }
 
-    // All subsequent requests must carry a valid Mcp-Session-Id.
-    // Per MCP spec, an unknown or expired session returns 404.
     match resolve_agent(&state.sessions, &headers).await {
         Ok(agent_id) => match state.gateway.handle(&agent_id, msg).await {
             Some(response) => Json(response).into_response(),
@@ -220,6 +246,135 @@ async fn handle_metrics(State(state): State<Arc<HttpState>>) -> impl IntoRespons
         )],
         body,
     )
+}
+
+// ── SSE proxy ─────────────────────────────────────────────────────────────────
+
+/// GET /mcp — MCP SSE transport.
+///
+/// With a valid `Mcp-Session-Id`: proxies the upstream SSE stream for that agent,
+/// applying response filtering to each event.
+///
+/// Without a session (legacy HTTP+SSE transport): sends an `endpoint` event that
+/// tells the client where to POST `initialize`.
+async fn handle_sse(
+    State(state): State<Arc<HttpState>>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    match resolve_agent(&state.sessions, &headers).await {
+        Ok(agent_id) => {
+            let upstream_url = state.gateway.upstream_url_for(&agent_id);
+            if upstream_url.is_empty() {
+                // Upstream is stdio — SSE proxy not supported in stdio mode
+                return StatusCode::NOT_IMPLEMENTED.into_response();
+            }
+            let config_rx = state.config.clone();
+            sse_proxy(upstream_url, config_rx).await.into_response()
+        }
+        Err(_) => {
+            // Legacy HTTP+SSE: no session yet — send endpoint event
+            let stream = futures_util::stream::once(async {
+                Ok::<Event, Infallible>(
+                    Event::default().event("endpoint").data("/mcp"),
+                )
+            });
+            Sse::new(stream).into_response()
+        }
+    }
+}
+
+/// Connects to the upstream SSE endpoint and proxies events downstream,
+/// filtering each event's data through the live block_patterns.
+async fn sse_proxy(
+    upstream_url: String,
+    config_rx: watch::Receiver<Arc<LiveConfig>>,
+) -> impl IntoResponse {
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(&upstream_url)
+        .header("Accept", "text/event-stream")
+        .send()
+        .await;
+
+    let resp = match resp {
+        Ok(r) if r.status().is_success() => r,
+        Ok(r) => {
+            eprintln!("[SSE] upstream returned {}", r.status());
+            return StatusCode::BAD_GATEWAY.into_response();
+        }
+        Err(e) => {
+            eprintln!("[SSE] upstream connection failed: {e}");
+            return StatusCode::BAD_GATEWAY.into_response();
+        }
+    };
+
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(32);
+
+    tokio::spawn(async move {
+        let mut byte_stream = resp.bytes_stream();
+        let mut buf = String::new();
+
+        while let Some(chunk) = byte_stream.next().await {
+            let Ok(bytes) = chunk else { break };
+            buf.push_str(&String::from_utf8_lossy(&bytes));
+
+            // SSE events are separated by blank lines (\n\n)
+            while let Some(pos) = buf.find("\n\n") {
+                let raw = buf[..pos].to_string();
+                buf = buf[pos + 2..].to_string();
+
+                if let Some(event) = parse_and_filter_sse(&raw, &config_rx) {
+                    if tx.send(Ok(event)).await.is_err() {
+                        return; // client disconnected
+                    }
+                }
+            }
+        }
+    });
+
+    let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+    Sse::new(stream).keep_alive(KeepAlive::default()).into_response()
+}
+
+/// Parse a raw SSE event block, apply response filtering, return an axum `Event`.
+/// Returns `None` if the event is dropped by the filter.
+fn parse_and_filter_sse(
+    raw: &str,
+    config_rx: &watch::Receiver<Arc<LiveConfig>>,
+) -> Option<Event> {
+    let mut event_type = "message".to_string();
+    let mut data_parts: Vec<&str> = Vec::new();
+    let mut comment: Option<&str> = None;
+
+    for line in raw.lines() {
+        if let Some(rest) = line.strip_prefix("event: ") {
+            event_type = rest.to_string();
+        } else if let Some(rest) = line.strip_prefix("data: ") {
+            data_parts.push(rest);
+        } else if let Some(rest) = line.strip_prefix(": ") {
+            comment = Some(rest);
+        }
+    }
+
+    // SSE comment (keepalive) — pass through
+    if data_parts.is_empty() {
+        return comment.map(|_| Event::default().comment(""));
+    }
+
+    let data = data_parts.join("\n");
+
+    // Apply block patterns to the event data
+    {
+        let cfg = config_rx.borrow();
+        for pattern in &cfg.block_patterns {
+            if pattern.is_match(&data) {
+                eprintln!("[SSE_FILTER] blocked event (pattern: {})", pattern.as_str());
+                return None; // drop the event
+            }
+        }
+    }
+
+    Some(Event::default().event(event_type).data(data))
 }
 
 /// Resolve agent_id from Mcp-Session-Id (MCP spec).

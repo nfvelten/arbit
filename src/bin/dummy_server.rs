@@ -1,12 +1,13 @@
 use axum::{
     extract::State,
     http::StatusCode,
-    response::IntoResponse,
-    routing::post,
+    response::{sse::{Event, KeepAlive, Sse}, IntoResponse},
+    routing::{get, post},
     Json, Router,
 };
+use futures_util::stream;
 use serde_json::{json, Value};
-use std::sync::Arc;
+use std::{convert::Infallible, sync::Arc};
 
 struct AppState {
     name: String,
@@ -20,6 +21,7 @@ async fn main() {
 
     let app = Router::new()
         .route("/mcp", post(handle_mcp))
+        .route("/mcp", get(handle_sse))
         .with_state(state);
 
     let addr = "0.0.0.0:3000";
@@ -27,6 +29,21 @@ async fn main() {
 
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
     axum::serve(listener, app).await.unwrap();
+}
+
+/// SSE endpoint — accepts GET /mcp with Accept: text/event-stream.
+/// Returns a minimal stream: endpoint event + keepalive.
+async fn handle_sse(
+    State(_state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let events = stream::iter(vec![
+        Ok::<Event, Infallible>(
+            Event::default()
+                .event("endpoint")
+                .data("/mcp"),
+        ),
+    ]);
+    Sse::new(events).keep_alive(KeepAlive::default())
 }
 
 async fn handle_mcp(

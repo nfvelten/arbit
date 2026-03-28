@@ -14,14 +14,18 @@ Agent (Cursor, Claude, etc.)
 
 ## What it does
 
-- **Auth** — each agent gets an explicit allowlist or denylist of tools
+- **Auth** — each agent gets an explicit allowlist or denylist of tools; optional pre-shared API key
 - **tools/list filtering** — agents only see the tools they are allowed to call
-- **Rate limiting** — per-agent sliding window (calls/min)
+- **Rate limiting** — per-agent sliding window (calls/min) + per-tool rate limits
 - **Payload filtering** — block requests whose arguments match sensitive patterns (passwords, API keys, tokens)
-- **Audit log** — every request recorded to SQLite with agent, method, tool, outcome, and reason
+- **Response filtering** — block upstream responses that contain sensitive patterns before they reach the agent
+- **Audit log** — every request recorded; fan-out to multiple backends simultaneously (SQLite, webhook, stdout)
 - **Multiple upstreams** — route different agents to different MCP servers
+- **Circuit breaker** — upstream failures open the circuit; automatic half-open probe after recovery timeout
+- **Config hot-reload** — agent policies and block patterns reload from disk every 5 seconds without restart
 - **Metrics** — Prometheus-compatible `/metrics` endpoint
 - **TLS** — optional HTTPS with certificate and key files
+- **SSE streaming** — `GET /mcp` proxies the upstream SSE stream with response filtering
 - **Transport agnostic** — works over HTTP+SSE or stdio; same config, same policies
 
 ## Installation
@@ -123,17 +127,51 @@ Each key is an agent name matched against the `clientInfo.name` field in the MCP
 | `allowed_tools` | Allowlist — only these tools are reachable. Omit to allow all. |
 | `denied_tools` | Denylist — these tools are always blocked, even if in the allowlist. |
 | `rate_limit` | Max `tools/call` requests per minute. Default: 60. |
+| `tool_rate_limits` | Per-tool rate limits (calls/min). Checked in addition to `rate_limit`. |
 | `upstream` | Named upstream to use for this agent. Falls back to the default. |
+| `api_key` | Pre-shared API key. Agent must send `X-Api-Key: <key>` on `initialize`. Optional. |
 
 Agents not listed in the config are blocked entirely.
+
+Example with api_key and tool_rate_limits:
+
+```yaml
+agents:
+  cursor:
+    allowed_tools: [read_file, write_file, list_directory]
+    rate_limit: 60
+    tool_rate_limits:
+      write_file: 5       # max 5 write_file calls/min, within the global 60/min
+      delete_file: 2
+    api_key: "sk-cursor-secret"
+```
 
 ### `rules`
 
 | Field | Description |
 |---|---|
-| `block_patterns` | List of regex patterns. Any `tools/call` whose arguments match is blocked. |
+| `block_patterns` | List of regex patterns. Any `tools/call` whose arguments **or upstream response** matches is blocked. |
 
-### `audit`
+Config changes to `agents` and `rules` are picked up automatically every 5 seconds — no restart required.
+
+### `audit` / `audits`
+
+Use `audit:` for a single backend or `audits:` to fan-out to multiple backends simultaneously:
+
+```yaml
+# Single backend (backward compatible)
+audit:
+  type: sqlite
+  path: "gateway-audit.db"
+
+# Multiple backends — all receive every event
+audits:
+  - type: sqlite
+    path: "gateway-audit.db"
+  - type: webhook
+    url: "https://hooks.example.com/mcp"
+    token: "secret"
+```
 
 | Value | Description |
 |---|---|
@@ -182,6 +220,25 @@ To explicitly end a session, send `DELETE /mcp` with the session header:
 ```sh
 curl -X DELETE http://localhost:4000/mcp -H "Mcp-Session-Id: <id>"
 # 204 No Content on success, 404 if the session is already gone
+```
+
+### SSE streaming
+
+Once a session is established, open a server-sent event stream to receive server-pushed notifications:
+
+```sh
+curl -N http://localhost:4000/mcp \
+  -H "Accept: text/event-stream" \
+  -H "Mcp-Session-Id: <id>"
+```
+
+The gateway proxies the upstream SSE stream and applies `block_patterns` to each event before forwarding it to the client.
+
+Without a session, `GET /mcp` returns an `endpoint` event (legacy HTTP+SSE transport):
+
+```
+event: endpoint
+data: /mcp
 ```
 
 ### HTTPS mode

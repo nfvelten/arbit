@@ -2,11 +2,85 @@ use super::McpUpstream;
 use async_trait::async_trait;
 use reqwest::{Client, ClientBuilder};
 use serde_json::{json, Value};
-use std::time::Duration;
+use std::{
+    sync::atomic::{AtomicUsize, Ordering},
+    sync::Arc,
+    time::{Duration, Instant},
+};
+use tokio::sync::Mutex;
+
+// ── Circuit breaker ───────────────────────────────────────────────────────────
+
+enum CbState {
+    Closed,
+    Open { until: Instant },
+    HalfOpen,
+}
+
+struct CircuitBreaker {
+    state: Mutex<CbState>,
+    failure_count: AtomicUsize,
+    threshold: usize,
+    recovery_secs: u64,
+}
+
+impl CircuitBreaker {
+    fn new(threshold: usize, recovery_secs: u64) -> Self {
+        Self {
+            state: Mutex::new(CbState::Closed),
+            failure_count: AtomicUsize::new(0),
+            threshold,
+            recovery_secs,
+        }
+    }
+
+    /// Returns true if the circuit is open (requests should be rejected immediately).
+    async fn is_open(&self) -> bool {
+        let mut state = self.state.lock().await;
+        match &*state {
+            CbState::Closed | CbState::HalfOpen => false,
+            CbState::Open { until } => {
+                if Instant::now() >= *until {
+                    *state = CbState::HalfOpen;
+                    eprintln!("[CIRCUIT] entering half-open, probing upstream");
+                    false
+                } else {
+                    true
+                }
+            }
+        }
+    }
+
+    async fn on_success(&self) {
+        let prev = self.failure_count.swap(0, Ordering::Relaxed);
+        let mut state = self.state.lock().await;
+        if !matches!(*state, CbState::Closed) {
+            eprintln!("[CIRCUIT] upstream recovered, circuit closed (was {prev} failures)");
+            *state = CbState::Closed;
+        }
+    }
+
+    async fn on_failure(&self) {
+        let count = self.failure_count.fetch_add(1, Ordering::Relaxed) + 1;
+        if count >= self.threshold {
+            let mut state = self.state.lock().await;
+            let until = Instant::now() + Duration::from_secs(self.recovery_secs);
+            *state = CbState::Open { until };
+            self.failure_count.store(0, Ordering::Relaxed);
+            eprintln!(
+                "[CIRCUIT] upstream circuit opened after {count} failures, retry in {}s",
+                self.recovery_secs
+            );
+        }
+    }
+}
+
+// ── HttpUpstream ──────────────────────────────────────────────────────────────
 
 pub struct HttpUpstream {
     url: String,
     client: Client,
+    cb: Arc<CircuitBreaker>,
 }
 
 impl HttpUpstream {
@@ -16,15 +90,28 @@ impl HttpUpstream {
             .pool_max_idle_per_host(10)
             .build()
             .expect("failed to build HTTP client");
-        Self { url: url.into(), client }
+        Self {
+            url: url.into(),
+            client,
+            cb: Arc::new(CircuitBreaker::new(5, 30)),
+        }
     }
 }
 
 #[async_trait]
 impl McpUpstream for HttpUpstream {
     async fn forward(&self, msg: &Value) -> Option<Value> {
+        if self.cb.is_open().await {
+            eprintln!("[UPSTREAM] circuit open, rejecting request");
+            return Some(json!({
+                "jsonrpc": "2.0",
+                "error": { "code": -32603, "message": "service unavailable (circuit open)" }
+            }));
+        }
+
         match self.client.post(&self.url).json(msg).send().await {
             Ok(resp) => {
+                self.cb.on_success().await;
                 if resp.status() == reqwest::StatusCode::ACCEPTED {
                     return None; // notification — no body
                 }
@@ -41,11 +128,16 @@ impl McpUpstream for HttpUpstream {
             }
             Err(e) => {
                 eprintln!("[UPSTREAM] request failed: {e}");
+                self.cb.on_failure().await;
                 Some(json!({
                     "jsonrpc": "2.0",
                     "error": { "code": -32603, "message": "service unavailable" }
                 }))
             }
         }
+    }
+
+    fn base_url(&self) -> &str {
+        &self.url
     }
 }
