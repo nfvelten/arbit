@@ -11,6 +11,9 @@ pub struct Config {
     pub agents: HashMap<String, AgentPolicy>,
     #[serde(default)]
     pub rules: Rules,
+    /// Named upstream servers — agents can reference these by name via `upstream:` in their policy.
+    #[serde(default)]
+    pub upstreams: HashMap<String, String>,
 }
 
 // ── Transport ────────────────────────────────────────────────────────────────
@@ -21,24 +24,46 @@ pub enum TransportConfig {
     Http {
         #[serde(default = "default_addr")]
         addr: String,
+        #[serde(default = "default_upstream_url")]
         upstream: String,
+        /// Session TTL in seconds. Requests with an expired session receive 404.
+        #[serde(default = "default_session_ttl")]
+        session_ttl_secs: u64,
+        /// Optional TLS — if present the server runs HTTPS, otherwise plain HTTP.
+        tls: Option<TlsConfig>,
     },
     Stdio {
         server: Vec<String>,
     },
 }
 
+#[derive(Debug, Deserialize, Clone)]
+pub struct TlsConfig {
+    pub cert: String,
+    pub key: String,
+}
+
 impl Default for TransportConfig {
     fn default() -> Self {
         TransportConfig::Http {
             addr: default_addr(),
-            upstream: "http://localhost:3000".to_string(),
+            upstream: default_upstream_url(),
+            session_ttl_secs: default_session_ttl(),
+            tls: None,
         }
     }
 }
 
 fn default_addr() -> String {
     "0.0.0.0:4000".to_string()
+}
+
+fn default_upstream_url() -> String {
+    "http://localhost:3000/mcp".to_string()
+}
+
+fn default_session_ttl() -> u64 {
+    3600
 }
 
 // ── Audit ────────────────────────────────────────────────────────────────────
@@ -73,6 +98,8 @@ pub struct AgentPolicy {
     pub denied_tools: Vec<String>,
     #[serde(default = "default_rate_limit")]
     pub rate_limit: usize,
+    /// Named upstream to use for this agent. Falls back to the default upstream if unset.
+    pub upstream: Option<String>,
 }
 
 fn default_rate_limit() -> usize {

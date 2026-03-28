@@ -8,7 +8,6 @@ use axum::{
 use serde_json::{json, Value};
 use std::sync::Arc;
 
-// Estado compartilhado — por enquanto só guarda o nome do server
 struct AppState {
     name: String,
 }
@@ -24,7 +23,7 @@ async fn main() {
         .with_state(state);
 
     let addr = "0.0.0.0:3000";
-    println!("MCP dummy server rodando em http://{addr}");
+    println!("MCP dummy server listening on http://{addr}");
 
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
     axum::serve(listener, app).await.unwrap();
@@ -58,9 +57,8 @@ async fn handle_mcp(
             .into_response()
         }
 
-        // Notification — sem resposta (202)
         "notifications/initialized" => {
-            println!("[notifications/initialized] handshake completo");
+            println!("[notifications/initialized] handshake complete");
             StatusCode::ACCEPTED.into_response()
         }
 
@@ -73,13 +71,13 @@ async fn handle_mcp(
                 "result": {
                     "tools": [{
                         "name": "echo",
-                        "description": "Retorna o texto enviado — tool de teste",
+                        "description": "Returns the text sent — test tool",
                         "inputSchema": {
                             "type": "object",
                             "properties": {
                                 "text": {
                                     "type": "string",
-                                    "description": "Texto a ser ecoado"
+                                    "description": "Text to echo back"
                                 }
                             },
                             "required": ["text"]
@@ -97,7 +95,7 @@ async fn handle_mcp(
 
             match tool_name {
                 "echo" => {
-                    let text = args["text"].as_str().unwrap_or("(vazio)");
+                    let text = args["text"].as_str().unwrap_or("(empty)");
                     Json(json!({
                         "jsonrpc": "2.0",
                         "id": id,
@@ -113,7 +111,7 @@ async fn handle_mcp(
                 _ => Json(json!({
                     "jsonrpc": "2.0",
                     "id": id,
-                    "error": { "code": -32601, "message": format!("tool '{tool_name}' não existe") }
+                    "error": { "code": -32601, "message": format!("tool '{tool_name}' not found") }
                 }))
                 .into_response(),
             }
@@ -121,11 +119,11 @@ async fn handle_mcp(
 
         // ── Fallback ─────────────────────────────────────────────────────
         other => {
-            println!("[desconhecido] method={other}");
+            println!("[unknown] method={other}");
             Json(json!({
                 "jsonrpc": "2.0",
                 "id": id,
-                "error": { "code": -32601, "message": format!("método '{other}' não implementado") }
+                "error": { "code": -32601, "message": format!("method '{other}' not implemented") }
             }))
             .into_response()
         }

@@ -1,6 +1,7 @@
 use crate::{
     audit::{AuditEntry, AuditLog, Outcome},
     config::AgentPolicy,
+    metrics::GatewayMetrics,
     middleware::{Decision, McpContext, Pipeline},
     upstream::McpUpstream,
 };
@@ -9,8 +10,12 @@ use std::{collections::HashMap, sync::Arc, time::SystemTime};
 
 pub struct McpGateway {
     pipeline: Pipeline,
-    upstream: Arc<dyn McpUpstream>,
+    /// Default upstream — used when the agent has no named upstream configured.
+    default_upstream: Arc<dyn McpUpstream>,
+    /// Named upstreams — keyed by the names defined in `config.upstreams`.
+    named_upstreams: HashMap<String, Arc<dyn McpUpstream>>,
     audit: Arc<dyn AuditLog>,
+    metrics: Arc<GatewayMetrics>,
     /// Per-agent policies — used to filter tools/list responses.
     policies: Arc<HashMap<String, AgentPolicy>>,
 }
@@ -18,11 +23,22 @@ pub struct McpGateway {
 impl McpGateway {
     pub fn new(
         pipeline: Pipeline,
-        upstream: Arc<dyn McpUpstream>,
+        default_upstream: Arc<dyn McpUpstream>,
+        named_upstreams: HashMap<String, Arc<dyn McpUpstream>>,
         audit: Arc<dyn AuditLog>,
+        metrics: Arc<GatewayMetrics>,
         policies: Arc<HashMap<String, AgentPolicy>>,
     ) -> Self {
-        Self { pipeline, upstream, audit, policies }
+        Self { pipeline, default_upstream, named_upstreams, audit, metrics, policies }
+    }
+
+    /// Select the upstream for a given agent. Falls back to the default.
+    fn upstream_for(&self, agent_id: &str) -> &Arc<dyn McpUpstream> {
+        self.policies
+            .get(agent_id)
+            .and_then(|p| p.upstream.as_ref())
+            .and_then(|name| self.named_upstreams.get(name))
+            .unwrap_or(&self.default_upstream)
     }
 
     /// Check policy without forwarding.
@@ -39,6 +55,7 @@ impl McpGateway {
                 tool: None,
                 outcome: Outcome::Forwarded,
             });
+            self.metrics.record(agent_id, "forwarded");
             return None;
         }
 
@@ -62,6 +79,7 @@ impl McpGateway {
                     tool: tool_name,
                     outcome: Outcome::Allowed,
                 });
+                self.metrics.record(agent_id, "allowed");
                 None
             }
             Decision::Block { reason } => {
@@ -72,6 +90,7 @@ impl McpGateway {
                     tool: tool_name,
                     outcome: Outcome::Blocked(reason.clone()),
                 });
+                self.metrics.record(agent_id, "blocked");
                 Some(json!({
                     "jsonrpc": "2.0",
                     "id": id,
@@ -81,7 +100,7 @@ impl McpGateway {
         }
     }
 
-    /// Policy check + upstream HTTP forwarding.
+    /// Policy check + upstream forwarding.
     /// Used by HttpTransport.
     pub async fn handle(&self, agent_id: &str, msg: Value) -> Option<Value> {
         let method = msg["method"].as_str().unwrap_or("").to_string();
@@ -89,7 +108,7 @@ impl McpGateway {
         match self.intercept(agent_id, &msg).await {
             Some(err) => Some(err),
             None => {
-                let response = self.upstream.forward(&msg).await;
+                let response = self.upstream_for(agent_id).forward(&msg).await;
                 // Filter tools/list so the agent only sees what it can call
                 if method == "tools/list" {
                     response.map(|r| self.filter_tools_response(agent_id, r))

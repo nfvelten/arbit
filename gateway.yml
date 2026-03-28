@@ -1,11 +1,20 @@
 transport:
   type: http
   addr: "0.0.0.0:4000"
-  upstream: "http://localhost:3000"
+  upstream: "http://localhost:3000/mcp"
+  session_ttl_secs: 3600
+  # tls:
+  #   cert: "cert.pem"
+  #   key:  "key.pem"
 
 audit:
   type: sqlite
   path: "gateway-audit.db"
+
+# Named upstreams — agents can reference these via `upstream:` in their policy.
+# upstreams:
+#   filesystem: "http://localhost:3001"
+#   database:   "http://localhost:3002"
 
 agents:
   cursor:

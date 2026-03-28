@@ -1,11 +1,11 @@
 use super::Transport;
-use crate::gateway::McpGateway;
+use crate::{config::TlsConfig, gateway::McpGateway, metrics::GatewayMetrics};
 use async_trait::async_trait;
 use axum::{
     extract::State,
     http::{HeaderMap, HeaderValue, StatusCode},
     response::IntoResponse,
-    routing::post,
+    routing::{get, post},
     Json, Router,
 };
 use serde_json::Value;
@@ -13,19 +13,17 @@ use std::{collections::HashMap, sync::Arc, time::Instant};
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
-const SESSION_MAX_AGE_SECS: u64 = 3600; // 1 hour
-const MAX_AGENT_ID_LEN: usize = 128;
-
 // ── Session store ────────────────────────────────────────────────────────────
 
 struct SessionStore {
     /// session_id → (agent_id, created_at)
     sessions: Mutex<HashMap<String, (String, Instant)>>,
+    ttl_secs: u64,
 }
 
 impl SessionStore {
-    fn new() -> Self {
-        Self { sessions: Mutex::new(HashMap::new()) }
+    fn new(ttl_secs: u64) -> Self {
+        Self { sessions: Mutex::new(HashMap::new()), ttl_secs }
     }
 
     async fn create(&self, agent_id: String) -> String {
@@ -33,9 +31,8 @@ impl SessionStore {
         let mut sessions = self.sessions.lock().await;
         // Purge expired sessions on every creation to bound memory usage
         let now = Instant::now();
-        sessions.retain(|_, (_, created)| {
-            now.duration_since(*created).as_secs() < SESSION_MAX_AGE_SECS
-        });
+        let ttl = self.ttl_secs;
+        sessions.retain(|_, (_, created)| now.duration_since(*created).as_secs() < ttl);
         sessions.insert(id.clone(), (agent_id, now));
         id
     }
@@ -43,7 +40,7 @@ impl SessionStore {
     async fn resolve(&self, session_id: &str) -> Option<String> {
         let sessions = self.sessions.lock().await;
         sessions.get(session_id).and_then(|(agent_id, created)| {
-            let expired = Instant::now().duration_since(*created).as_secs() >= SESSION_MAX_AGE_SECS;
+            let expired = Instant::now().duration_since(*created).as_secs() >= self.ttl_secs;
             if expired { None } else { Some(agent_id.clone()) }
         })
     }
@@ -53,38 +50,78 @@ impl SessionStore {
 
 pub struct HttpTransport {
     addr: String,
+    session_ttl_secs: u64,
+    tls: Option<TlsConfig>,
+    metrics: Arc<GatewayMetrics>,
 }
 
 impl HttpTransport {
-    pub fn new(addr: impl Into<String>) -> Self {
-        Self { addr: addr.into() }
+    pub fn new(
+        addr: impl Into<String>,
+        session_ttl_secs: u64,
+        tls: Option<TlsConfig>,
+        metrics: Arc<GatewayMetrics>,
+    ) -> Self {
+        Self { addr: addr.into(), session_ttl_secs, tls, metrics }
     }
 }
 
 struct HttpState {
     gateway: Arc<McpGateway>,
     sessions: Arc<SessionStore>,
+    metrics: Arc<GatewayMetrics>,
 }
+
+const MAX_AGENT_ID_LEN: usize = 128;
 
 #[async_trait]
 impl Transport for HttpTransport {
     async fn serve(&self, gateway: Arc<McpGateway>) -> anyhow::Result<()> {
         let state = Arc::new(HttpState {
             gateway,
-            sessions: Arc::new(SessionStore::new()),
+            sessions: Arc::new(SessionStore::new(self.session_ttl_secs)),
+            metrics: Arc::clone(&self.metrics),
         });
 
         let app = Router::new()
             .route("/mcp", post(handle_mcp))
+            .route("/metrics", get(handle_metrics))
             .with_state(state);
 
-        eprintln!("[GATEWAY] HTTP mode listening on http://{}", self.addr);
-        let listener = tokio::net::TcpListener::bind(&self.addr).await?;
-        axum::serve(listener, app)
-            .with_graceful_shutdown(shutdown_signal())
-            .await?;
-        Ok(())
+        if let Some(tls) = &self.tls {
+            eprintln!("[GATEWAY] HTTPS mode listening on https://{}", self.addr);
+            serve_tls(app, &self.addr, &tls.cert, &tls.key).await
+        } else {
+            eprintln!("[GATEWAY] HTTP mode listening on http://{}", self.addr);
+            let listener = tokio::net::TcpListener::bind(&self.addr).await?;
+            axum::serve(listener, app)
+                .with_graceful_shutdown(shutdown_signal())
+                .await?;
+            Ok(())
+        }
     }
+}
+
+// ── TLS ───────────────────────────────────────────────────────────────────────
+
+async fn serve_tls(app: Router, addr: &str, cert: &str, key: &str) -> anyhow::Result<()> {
+    use axum_server::tls_rustls::RustlsConfig;
+
+    let tls_config = RustlsConfig::from_pem_file(cert, key).await?;
+    let addr: std::net::SocketAddr = addr.parse()?;
+
+    let handle = axum_server::Handle::new();
+    let h = handle.clone();
+    tokio::spawn(async move {
+        shutdown_signal().await;
+        h.graceful_shutdown(Some(std::time::Duration::from_secs(30)));
+    });
+
+    axum_server::bind_rustls(addr, tls_config)
+        .handle(handle)
+        .serve(app.into_make_service())
+        .await?;
+    Ok(())
 }
 
 // ── Shutdown signal ───────────────────────────────────────────────────────────
@@ -106,7 +143,7 @@ async fn shutdown_signal() {
     eprintln!("[GATEWAY] shutdown signal received, draining audit...");
 }
 
-// ── Handler ──────────────────────────────────────────────────────────────────
+// ── Handlers ─────────────────────────────────────────────────────────────────
 
 async fn handle_mcp(
     State(state): State<Arc<HttpState>>,
@@ -121,7 +158,6 @@ async fn handle_mcp(
             .as_str()
             .unwrap_or("unknown");
 
-        // Reject oversized or malformed agent IDs before they touch any data structure
         if agent_name.len() > MAX_AGENT_ID_LEN {
             return StatusCode::BAD_REQUEST.into_response();
         }
@@ -151,6 +187,17 @@ async fn handle_mcp(
         },
         Err(status) => status.into_response(),
     }
+}
+
+async fn handle_metrics(State(state): State<Arc<HttpState>>) -> impl IntoResponse {
+    let body = state.metrics.render();
+    (
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; version=0.0.4; charset=utf-8",
+        )],
+        body,
+    )
 }
 
 /// Resolve agent_id from Mcp-Session-Id (MCP spec).

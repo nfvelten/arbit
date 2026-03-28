@@ -2,15 +2,16 @@ use mcp_gateway::{
     audit::{sqlite::SqliteAudit, stdout::StdoutAudit, AuditLog},
     config::{AuditConfig, Config, TransportConfig},
     gateway::McpGateway,
+    metrics::GatewayMetrics,
     middleware::{
         auth::AuthMiddleware, payload_filter::PayloadFilterMiddleware,
         rate_limit::RateLimitMiddleware, Pipeline,
     },
     transport::{http::HttpTransport, stdio::StdioTransport, Transport},
-    upstream::http::HttpUpstream,
+    upstream::{http::HttpUpstream, McpUpstream},
 };
 use regex::Regex;
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -41,23 +42,41 @@ async fn main() -> anyhow::Result<()> {
         .add(Arc::new(AuthMiddleware::new(Arc::clone(&agents))))
         .add(Arc::new(PayloadFilterMiddleware::new(block_patterns)));
 
+    // Build named upstreams from config — shared across all transports
+    let named_upstreams: HashMap<String, Arc<dyn McpUpstream>> = config
+        .upstreams
+        .iter()
+        .map(|(name, url)| {
+            let upstream: Arc<dyn McpUpstream> = Arc::new(HttpUpstream::new(url));
+            (name.clone(), upstream)
+        })
+        .collect();
+
+    let metrics = Arc::new(GatewayMetrics::new()?);
+
     match config.transport {
-        TransportConfig::Http { addr, upstream } => {
+        TransportConfig::Http { addr, upstream, session_ttl_secs, tls } => {
             eprintln!("[GATEWAY] HTTP mode | upstream={upstream} | addr={addr}");
             let gateway = Arc::new(McpGateway::new(
                 pipeline,
-                Arc::new(HttpUpstream::new(upstream)),
+                Arc::new(HttpUpstream::new(&upstream)),
+                named_upstreams,
                 audit.clone(),
+                Arc::clone(&metrics),
                 Arc::clone(&agents),
             ));
-            HttpTransport::new(addr).serve(gateway).await?;
+            HttpTransport::new(addr, session_ttl_secs, tls, metrics)
+                .serve(gateway)
+                .await?;
         }
         TransportConfig::Stdio { server } => {
             eprintln!("[GATEWAY] stdio mode | server={}", server.join(" "));
             let gateway = Arc::new(McpGateway::new(
                 pipeline,
                 Arc::new(HttpUpstream::new("")), // not used in stdio mode
+                named_upstreams,
                 audit.clone(),
+                Arc::clone(&metrics),
                 Arc::clone(&agents),
             ));
             StdioTransport::new(server).serve(gateway).await?;
