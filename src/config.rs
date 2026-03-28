@@ -19,11 +19,13 @@ pub struct Config {
     /// Named upstream servers — agents can reference these by name via `upstream:` in their policy.
     #[serde(default)]
     pub upstreams: HashMap<String, String>,
-    /// Optional JWT / OIDC authentication configuration.
-    pub auth: Option<JwtConfig>,
+    /// JWT / OIDC authentication — single provider or list of providers.
+    pub auth: Option<AuthConfig>,
     /// Optional Bearer token required to access `/dashboard` and `/metrics`.
     /// When unset both endpoints are publicly accessible.
     pub admin_token: Option<String>,
+    /// OpenTelemetry tracing — exports spans to an OTLP endpoint.
+    pub telemetry: Option<TelemetryConfig>,
 }
 
 // ── Transport ────────────────────────────────────────────────────────────────
@@ -149,6 +151,39 @@ fn default_rate_limit() -> usize {
 
 // ── JWT / OIDC ────────────────────────────────────────────────────────────────
 
+/// Accepts either a single provider config or a list of providers.
+/// On `initialize`, each provider is tried in order — the first that
+/// successfully validates the token wins.
+///
+/// ```yaml
+/// # Single provider (backward compatible)
+/// auth:
+///   jwks_url: "https://example.com/.well-known/jwks.json"
+///
+/// # Multiple providers
+/// auth:
+///   - provider: google
+///     audience: "my-client-id"
+///   - provider: okta
+///     issuer: "https://dev-123.okta.com"
+/// ```
+#[derive(Debug, Deserialize, Clone)]
+#[serde(untagged)]
+pub enum AuthConfig {
+    Single(JwtConfig),
+    Multi(Vec<JwtConfig>),
+}
+
+impl AuthConfig {
+    /// Expand into a flat list of validated configs.
+    pub fn into_configs(self) -> anyhow::Result<Vec<JwtConfig>> {
+        match self {
+            AuthConfig::Single(c) => Ok(vec![c.with_provider_defaults()?]),
+            AuthConfig::Multi(cs) => cs.into_iter().map(|c| c.with_provider_defaults()).collect(),
+        }
+    }
+}
+
 /// JWT authentication config — validated on every `initialize` that carries
 /// an `Authorization: Bearer <token>` header. The decoded claim identified by
 /// `agent_claim` is used as the agent identity.
@@ -156,19 +191,96 @@ fn default_rate_limit() -> usize {
 pub struct JwtConfig {
     /// HMAC secret for HS256 tokens. Mutually exclusive with `jwks_url`.
     pub secret: Option<String>,
-    /// JWKS endpoint URL for RS256/ES256 (OIDC). Mutually exclusive with `secret`.
+    /// Explicit JWKS endpoint URL. Mutually exclusive with `secret`.
+    /// Ignored when `oidc_discovery: true` — the URL is discovered automatically.
     pub jwks_url: Option<String>,
     /// Required `iss` claim. Token is rejected if the issuer doesn't match.
+    /// Also used as the base URL for OIDC discovery.
     pub issuer: Option<String>,
     /// Required `aud` claim. Token is rejected if the audience doesn't match.
     pub audience: Option<String>,
     /// JWT claim used as the agent identity. Defaults to `"sub"`.
     #[serde(default = "default_agent_claim")]
     pub agent_claim: String,
+    /// Auto-discover the JWKS URL from `{issuer}/.well-known/openid-configuration`.
+    /// Enabled automatically when `provider` is set. Requires `issuer`.
+    #[serde(default)]
+    pub oidc_discovery: bool,
+    /// Provider shorthand. Sets `issuer` and enables `oidc_discovery` automatically.
+    /// Supported: `google`, `github-actions`, `auth0`, `okta`.
+    /// For `auth0` and `okta`, `issuer` must also be set.
+    pub provider: Option<String>,
+}
+
+impl Default for JwtConfig {
+    fn default() -> Self {
+        Self {
+            secret: None,
+            jwks_url: None,
+            issuer: None,
+            audience: None,
+            agent_claim: default_agent_claim(),
+            oidc_discovery: false,
+            provider: None,
+        }
+    }
+}
+
+impl JwtConfig {
+    /// Apply built-in provider defaults and validate the config.
+    pub fn with_provider_defaults(mut self) -> anyhow::Result<Self> {
+        match self.provider.as_deref() {
+            Some("google") => {
+                self.issuer.get_or_insert_with(|| "https://accounts.google.com".to_string());
+                self.oidc_discovery = true;
+            }
+            Some("github-actions") => {
+                self.issuer
+                    .get_or_insert_with(|| "https://token.actions.githubusercontent.com".to_string());
+                self.oidc_discovery = true;
+            }
+            Some("auth0") => {
+                if self.issuer.is_none() {
+                    return Err(anyhow::anyhow!("provider 'auth0' requires 'issuer' to be set"));
+                }
+                self.oidc_discovery = true;
+            }
+            Some("okta") => {
+                if self.issuer.is_none() {
+                    return Err(anyhow::anyhow!("provider 'okta' requires 'issuer' to be set"));
+                }
+                self.oidc_discovery = true;
+            }
+            Some(p) => {
+                return Err(anyhow::anyhow!(
+                    "unknown auth provider '{p}'. Supported: google, github-actions, auth0, okta"
+                ))
+            }
+            None => {}
+        }
+        Ok(self)
+    }
 }
 
 fn default_agent_claim() -> String {
     "sub".to_string()
+}
+
+// ── Telemetry ─────────────────────────────────────────────────────────────────
+
+/// OpenTelemetry tracing configuration.
+/// When set, spans are exported to the configured OTLP endpoint.
+#[derive(Debug, Deserialize, Clone)]
+pub struct TelemetryConfig {
+    /// OTLP gRPC endpoint (e.g. `http://localhost:4317`).
+    pub otlp_endpoint: String,
+    /// `service.name` resource attribute. Defaults to `"mcp-gateway"`.
+    #[serde(default = "default_service_name")]
+    pub service_name: String,
+}
+
+fn default_service_name() -> String {
+    "mcp-gateway".to_string()
 }
 
 // ── Rules ─────────────────────────────────────────────────────────────────────
@@ -298,6 +410,7 @@ mod tests {
             upstreams: HashMap::new(),
             auth: None,
             admin_token: None,
+            telemetry: None,
         }
     }
 
@@ -374,5 +487,67 @@ mod tests {
             circuit_breaker: CircuitBreakerConfig { threshold: 0, recovery_secs: 30 },
         };
         assert!(cfg.validate().is_err());
+    }
+
+    // ── JwtConfig provider presets ───────────────────────────────────────────
+
+    #[test]
+    fn google_preset_sets_issuer_and_discovery() {
+        let cfg = JwtConfig { provider: Some("google".to_string()), ..JwtConfig::default() }
+            .with_provider_defaults()
+            .unwrap();
+        assert_eq!(cfg.issuer.as_deref(), Some("https://accounts.google.com"));
+        assert!(cfg.oidc_discovery);
+    }
+
+    #[test]
+    fn github_actions_preset_sets_issuer() {
+        let cfg = JwtConfig {
+            provider: Some("github-actions".to_string()),
+            ..JwtConfig::default()
+        }
+        .with_provider_defaults()
+        .unwrap();
+        assert_eq!(
+            cfg.issuer.as_deref(),
+            Some("https://token.actions.githubusercontent.com")
+        );
+        assert!(cfg.oidc_discovery);
+    }
+
+    #[test]
+    fn auth0_without_issuer_fails() {
+        let cfg = JwtConfig { provider: Some("auth0".to_string()), ..JwtConfig::default() };
+        assert!(cfg.with_provider_defaults().is_err());
+    }
+
+    #[test]
+    fn auth0_with_issuer_enables_discovery() {
+        let cfg = JwtConfig {
+            provider: Some("auth0".to_string()),
+            issuer: Some("https://myapp.auth0.com".to_string()),
+            ..JwtConfig::default()
+        }
+        .with_provider_defaults()
+        .unwrap();
+        assert!(cfg.oidc_discovery);
+    }
+
+    #[test]
+    fn unknown_provider_fails() {
+        let cfg = JwtConfig { provider: Some("magic".to_string()), ..JwtConfig::default() };
+        assert!(cfg.with_provider_defaults().is_err());
+    }
+
+    #[test]
+    fn no_provider_is_unchanged() {
+        let cfg = JwtConfig {
+            secret: Some("s".to_string()),
+            ..JwtConfig::default()
+        }
+        .with_provider_defaults()
+        .unwrap();
+        assert_eq!(cfg.secret.as_deref(), Some("s"));
+        assert!(!cfg.oidc_discovery);
     }
 }

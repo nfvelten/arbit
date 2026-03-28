@@ -12,6 +12,7 @@ use std::{
 use tokio::{sync::Mutex, time::timeout};
 
 const JWKS_FETCH_TIMEOUT: Duration = Duration::from_secs(5);
+const JWKS_TTL: Duration = Duration::from_secs(300);
 
 // ── JWKS cache ────────────────────────────────────────────────────────────────
 
@@ -25,13 +26,18 @@ pub struct JwtValidator {
     config: JwtConfig,
     /// Cached JWKS — populated lazily and refreshed every 5 minutes.
     jwks_cache: Mutex<Option<JwksCache>>,
+    /// Resolved JWKS URL — populated lazily from OIDC discovery when
+    /// `oidc_discovery: true` and no explicit `jwks_url` is set.
+    resolved_jwks_url: Mutex<Option<String>>,
 }
-
-const JWKS_TTL: Duration = Duration::from_secs(300);
 
 impl JwtValidator {
     pub fn new(config: JwtConfig) -> Self {
-        Self { config, jwks_cache: Mutex::new(None) }
+        Self {
+            config,
+            jwks_cache: Mutex::new(None),
+            resolved_jwks_url: Mutex::new(None),
+        }
     }
 
     /// Validate a raw Bearer token and return the agent identity extracted
@@ -39,10 +45,8 @@ impl JwtValidator {
     pub async fn validate(&self, token: &str) -> Result<String, String> {
         if let Some(secret) = &self.config.secret {
             self.validate_hmac(token, secret)
-        } else if self.config.jwks_url.is_some() {
-            self.validate_jwks(token).await
         } else {
-            Err("no JWT secret or jwks_url configured".to_string())
+            self.validate_jwks(token).await
         }
     }
 
@@ -97,8 +101,38 @@ impl JwtValidator {
         self.extract_agent_claim(&data.claims)
     }
 
+    /// Resolve the JWKS URL — either directly from config or via OIDC discovery.
+    async fn resolve_jwks_url(&self) -> Result<String, String> {
+        // Explicit jwks_url takes priority
+        if let Some(url) = &self.config.jwks_url {
+            return Ok(url.clone());
+        }
+
+        if self.config.oidc_discovery {
+            // Check discovery cache
+            {
+                let cached = self.resolved_jwks_url.lock().await;
+                if let Some(url) = &*cached {
+                    return Ok(url.clone());
+                }
+            }
+
+            let issuer = self.config.issuer.as_ref()
+                .ok_or_else(|| "oidc_discovery requires issuer to be set".to_string())?;
+
+            let url = oidc_discover_jwks(issuer).await
+                .map_err(|e| format!("OIDC discovery failed: {e}"))?;
+
+            tracing::info!(issuer, jwks_url = %url, "OIDC discovery completed");
+            *self.resolved_jwks_url.lock().await = Some(url.clone());
+            return Ok(url);
+        }
+
+        Err("no jwks_url configured and oidc_discovery is false".to_string())
+    }
+
     async fn get_jwks(&self) -> Result<Arc<JwkSet>, String> {
-        let url = self.config.jwks_url.as_ref().unwrap();
+        let url = self.resolve_jwks_url().await?;
 
         {
             let cache = self.jwks_cache.lock().await;
@@ -111,7 +145,7 @@ impl JwtValidator {
 
         // Fetch fresh JWKS — abort if the endpoint doesn't respond in time
         let body = timeout(JWKS_FETCH_TIMEOUT, async {
-            reqwest::get(url)
+            reqwest::get(&url)
                 .await
                 .map_err(|e| format!("JWKS fetch failed: {e}"))?
                 .text()
@@ -126,7 +160,7 @@ impl JwtValidator {
 
         let result = Arc::new(keys.clone());
         *self.jwks_cache.lock().await = Some(JwksCache { keys, fetched_at: Instant::now() });
-        tracing::info!(url, "JWKS refreshed");
+        tracing::info!(url = %url, "JWKS refreshed");
 
         Ok(result)
     }
@@ -160,6 +194,57 @@ impl JwtValidator {
     }
 }
 
+// ── OIDC discovery ────────────────────────────────────────────────────────────
+
+/// Fetch the OIDC discovery document for `issuer` and return the `jwks_uri`.
+async fn oidc_discover_jwks(issuer: &str) -> anyhow::Result<String> {
+    let discovery_url = format!(
+        "{}/.well-known/openid-configuration",
+        issuer.trim_end_matches('/')
+    );
+
+    let doc: Value = timeout(JWKS_FETCH_TIMEOUT, async {
+        reqwest::get(&discovery_url)
+            .await?
+            .json::<Value>()
+            .await
+    })
+    .await
+    .map_err(|_| anyhow::anyhow!("OIDC discovery timed out for {issuer}"))??;
+
+    doc["jwks_uri"]
+        .as_str()
+        .map(String::from)
+        .ok_or_else(|| anyhow::anyhow!("no jwks_uri in OIDC discovery document at {discovery_url}"))
+}
+
+// ── Multi-provider validator ──────────────────────────────────────────────────
+
+/// Tries each configured provider in order — the first that successfully
+/// validates the token wins. Used when `auth:` contains a list of providers.
+pub struct MultiJwtValidator {
+    validators: Vec<JwtValidator>,
+}
+
+impl MultiJwtValidator {
+    pub fn new(configs: Vec<JwtConfig>) -> Self {
+        Self { validators: configs.into_iter().map(JwtValidator::new).collect() }
+    }
+
+    /// Validate a Bearer token against all configured providers.
+    /// Returns the agent identity from the first provider that accepts the token.
+    pub async fn validate(&self, token: &str) -> Result<String, String> {
+        let mut last_err = "no auth providers configured".to_string();
+        for v in &self.validators {
+            match v.validate(token).await {
+                Ok(id) => return Ok(id),
+                Err(e) => last_err = e,
+            }
+        }
+        Err(last_err)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -169,8 +254,6 @@ mod tests {
 
     const SECRET: &str = "test-secret";
 
-    // Pre-built token: {"sub":"test-agent","exp":9999999999}  secret="test-secret"
-    // Generated via: echo -n '...' | jwt-cli or jsonwebtoken::encode below
     fn make_token(claims: serde_json::Value, secret: &str) -> String {
         encode(
             &Header::default(), // HS256
@@ -183,10 +266,7 @@ mod tests {
     fn validator(secret: &str) -> JwtValidator {
         JwtValidator::new(JwtConfig {
             secret: Some(secret.to_string()),
-            jwks_url: None,
-            issuer: None,
-            audience: None,
-            agent_claim: "sub".to_string(),
+            ..JwtConfig::default()
         })
     }
 
@@ -213,7 +293,6 @@ mod tests {
 
     #[tokio::test]
     async fn token_without_exp_fails() {
-        // set_required_spec_claims(&["exp"]) enforces this
         let token = make_token(json!({"sub": "test-agent"}), SECRET);
         let v = validator(SECRET);
         assert!(v.validate(&token).await.is_err());
@@ -221,13 +300,7 @@ mod tests {
 
     #[tokio::test]
     async fn neither_secret_nor_jwks_fails() {
-        let v = JwtValidator::new(JwtConfig {
-            secret: None,
-            jwks_url: None,
-            issuer: None,
-            audience: None,
-            agent_claim: "sub".to_string(),
-        });
+        let v = JwtValidator::new(JwtConfig::default());
         let token = make_token(json!({"sub": "a", "exp": 9_999_999_999u64}), SECRET);
         assert!(v.validate(&token).await.is_err());
     }
@@ -236,10 +309,8 @@ mod tests {
     async fn custom_agent_claim_extracted() {
         let v = JwtValidator::new(JwtConfig {
             secret: Some(SECRET.to_string()),
-            jwks_url: None,
-            issuer: None,
-            audience: None,
             agent_claim: "agent_id".to_string(),
+            ..JwtConfig::default()
         });
         let token = make_token(json!({"agent_id": "my-agent", "exp": 9_999_999_999u64}), SECRET);
         assert_eq!(v.validate(&token).await.unwrap(), "my-agent");
@@ -247,7 +318,7 @@ mod tests {
 
     #[tokio::test]
     async fn missing_agent_claim_fails() {
-        let token = make_token(json!({"exp": 9_999_999_999u64}), SECRET); // no "sub"
+        let token = make_token(json!({"exp": 9_999_999_999u64}), SECRET);
         let v = validator(SECRET);
         assert!(v.validate(&token).await.is_err());
     }
@@ -263,10 +334,8 @@ mod tests {
     async fn issuer_mismatch_fails() {
         let v = JwtValidator::new(JwtConfig {
             secret: Some(SECRET.to_string()),
-            jwks_url: None,
             issuer: Some("https://expected.example.com".to_string()),
-            audience: None,
-            agent_claim: "sub".to_string(),
+            ..JwtConfig::default()
         });
         let token = make_token(
             json!({"sub": "a", "exp": 9_999_999_999u64, "iss": "https://other.example.com"}),
@@ -279,15 +348,42 @@ mod tests {
     async fn issuer_match_passes() {
         let v = JwtValidator::new(JwtConfig {
             secret: Some(SECRET.to_string()),
-            jwks_url: None,
             issuer: Some("https://auth.example.com".to_string()),
-            audience: None,
-            agent_claim: "sub".to_string(),
+            ..JwtConfig::default()
         });
         let token = make_token(
             json!({"sub": "a", "exp": 9_999_999_999u64, "iss": "https://auth.example.com"}),
             SECRET,
         );
         assert_eq!(v.validate(&token).await.unwrap(), "a");
+    }
+
+    // ── MultiJwtValidator ─────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn multi_validator_first_match_wins() {
+        let token = make_token(json!({"sub": "agent-a", "exp": 9_999_999_999u64}), "secret-a");
+        let mv = MultiJwtValidator::new(vec![
+            JwtConfig { secret: Some("secret-b".to_string()), ..JwtConfig::default() },
+            JwtConfig { secret: Some("secret-a".to_string()), ..JwtConfig::default() },
+        ]);
+        assert_eq!(mv.validate(&token).await.unwrap(), "agent-a");
+    }
+
+    #[tokio::test]
+    async fn multi_validator_all_fail_returns_err() {
+        let token = make_token(json!({"sub": "a", "exp": 9_999_999_999u64}), "other");
+        let mv = MultiJwtValidator::new(vec![
+            JwtConfig { secret: Some("wrong-1".to_string()), ..JwtConfig::default() },
+            JwtConfig { secret: Some("wrong-2".to_string()), ..JwtConfig::default() },
+        ]);
+        assert!(mv.validate(&token).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn multi_validator_empty_returns_err() {
+        let mv = MultiJwtValidator::new(vec![]);
+        let token = make_token(json!({"sub": "a", "exp": 9_999_999_999u64}), SECRET);
+        assert!(mv.validate(&token).await.is_err());
     }
 }

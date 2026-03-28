@@ -3,40 +3,35 @@ use mcp_gateway::{
         fanout::FanoutAudit, sqlite::SqliteAudit, stdout::StdoutAudit, webhook::WebhookAudit,
         AuditLog,
     },
-    config::{AuditConfig, Config, TransportConfig},
-    prompt_injection,
+    config::{AuditConfig, Config, TelemetryConfig, TransportConfig},
     gateway::McpGateway,
-    jwt::JwtValidator,
+    jwt::MultiJwtValidator,
     live_config::LiveConfig,
     metrics::GatewayMetrics,
     middleware::{
         auth::AuthMiddleware, payload_filter::PayloadFilterMiddleware,
         rate_limit::RateLimitMiddleware, Pipeline,
     },
+    prompt_injection,
     transport::{http::HttpTransport, stdio::StdioTransport, Transport},
     upstream::{http::HttpUpstream, McpUpstream},
 };
 use regex::Regex;
 use std::{collections::HashMap, sync::Arc, time::Duration};
 use tokio::sync::watch;
-use tracing_subscriber::{fmt, EnvFilter};
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // ── Logging ────────────────────────────────────────────────────────────────
+    // Load config first — needed for telemetry setup
+    let config_path = std::env::args().nth(1).unwrap_or_else(|| "gateway.yml".into());
+    let config = Config::from_file(&config_path)?;
+
+    // ── Logging + OpenTelemetry ────────────────────────────────────────────────
     // LOG_FORMAT=json  → structured JSON (production)
     // LOG_FORMAT=<anything else> or unset → human-readable (default)
     // LOG_LEVEL overrides the default "info" level (e.g. LOG_LEVEL=debug)
-    let filter = EnvFilter::try_from_env("LOG_LEVEL")
-        .unwrap_or_else(|_| EnvFilter::new("info"));
-    if std::env::var("LOG_FORMAT").as_deref() == Ok("json") {
-        fmt().json().with_env_filter(filter).init();
-    } else {
-        fmt().with_env_filter(filter).init();
-    }
-
-    let config_path = std::env::args().nth(1).unwrap_or_else(|| "gateway.yml".into());
-    let config = Config::from_file(&config_path)?;
+    let _otel_guard = init_tracing(config.telemetry.as_ref());
 
     // ── Audit log — pluggable, fan-out to all configured backends ──────────────
     let mut audit_backends: Vec<Arc<dyn AuditLog>> = Vec::new();
@@ -167,14 +162,11 @@ async fn main() -> anyhow::Result<()> {
 
     let metrics = Arc::new(GatewayMetrics::new()?);
 
-    // ── JWT validator — built once at startup ───────────────────────────────
-    let jwt = config.auth.map(|jwt_cfg| {
-        if let Some(url) = &jwt_cfg.jwks_url {
-            tracing::info!(url, "JWT auth via JWKS");
-        } else {
-            tracing::info!("JWT auth via HMAC secret");
-        }
-        Arc::new(JwtValidator::new(jwt_cfg))
+    // ── JWT / OAuth validator — built once at startup ──────────────────────
+    let jwt = config.auth.map(|auth_cfg| {
+        let configs = auth_cfg.into_configs().expect("invalid auth config");
+        tracing::info!(providers = configs.len(), "auth configured");
+        Arc::new(MultiJwtValidator::new(configs))
     });
 
     match config.transport {
@@ -280,4 +272,87 @@ fn do_reload(
             }
         }
     }
+}
+
+// ── OpenTelemetry ─────────────────────────────────────────────────────────────
+
+/// RAII guard that shuts down the global OTel tracer provider on drop,
+/// flushing any buffered spans before the process exits.
+struct OtelGuard;
+
+impl Drop for OtelGuard {
+    fn drop(&mut self) {
+        opentelemetry::global::shutdown_tracer_provider();
+    }
+}
+
+/// Initialise tracing subscriber (fmt + optional OTel OTLP layer).
+///
+/// LOG_FORMAT=json  → structured JSON output
+/// LOG_LEVEL        → override log level (default: info)
+/// telemetry config → enables OTLP span export when present
+fn init_tracing(telemetry: Option<&TelemetryConfig>) -> Option<OtelGuard> {
+    let filter = EnvFilter::try_from_env("LOG_LEVEL")
+        .unwrap_or_else(|_| EnvFilter::new("info"));
+    let json = std::env::var("LOG_FORMAT").as_deref() == Ok("json");
+
+    let tracer = telemetry.and_then(|tel| match build_otel_tracer(tel) {
+        Ok(t) => Some(t),
+        Err(e) => { eprintln!("warn: OTel init failed: {e}"); None }
+    });
+
+    let has_otel = tracer.is_some();
+
+    // Four branches to keep concrete types — Option<Layer> would require boxing
+    // both the fmt and OTel layers due to incompatible generic parameters.
+    match (json, tracer) {
+        (true, Some(t)) => tracing_subscriber::registry()
+            .with(filter)
+            .with(tracing_subscriber::fmt::layer().json())
+            .with(tracing_opentelemetry::layer().with_tracer(t))
+            .init(),
+        (true, None) => tracing_subscriber::registry()
+            .with(filter)
+            .with(tracing_subscriber::fmt::layer().json())
+            .init(),
+        (false, Some(t)) => tracing_subscriber::registry()
+            .with(filter)
+            .with(tracing_subscriber::fmt::layer())
+            .with(tracing_opentelemetry::layer().with_tracer(t))
+            .init(),
+        (false, None) => tracing_subscriber::registry()
+            .with(filter)
+            .with(tracing_subscriber::fmt::layer())
+            .init(),
+    }
+
+    if has_otel { Some(OtelGuard) } else { None }
+}
+
+/// Build an OTLP gRPC tracer. Returns the `Tracer` handle so the caller can
+/// create a `tracing_opentelemetry::Layer` with the correct concrete type.
+fn build_otel_tracer(
+    tel: &TelemetryConfig,
+) -> anyhow::Result<opentelemetry_sdk::trace::Tracer> {
+    use opentelemetry::trace::TracerProvider as _;
+    use opentelemetry::KeyValue;
+    use opentelemetry_otlp::WithExportConfig;
+    use opentelemetry_sdk::{runtime::Tokio, trace::Config, Resource};
+
+    let resource = Resource::new(vec![
+        KeyValue::new("service.name", tel.service_name.clone()),
+    ]);
+
+    let provider = opentelemetry_otlp::new_pipeline()
+        .tracing()
+        .with_exporter(
+            opentelemetry_otlp::new_exporter()
+                .tonic()
+                .with_endpoint(&tel.otlp_endpoint),
+        )
+        .with_trace_config(Config::default().with_resource(resource))
+        .install_batch(Tokio)
+        .map_err(|e| anyhow::anyhow!("OTLP pipeline: {e}"))?;
+
+    Ok(provider.tracer("mcp-gateway"))
 }

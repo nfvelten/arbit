@@ -2,7 +2,7 @@ use super::Transport;
 use crate::{
     config::TlsConfig,
     gateway::McpGateway,
-    jwt::JwtValidator,
+    jwt::MultiJwtValidator,
     live_config::LiveConfig,
     metrics::GatewayMetrics,
 };
@@ -84,7 +84,7 @@ pub struct HttpTransport {
     tls: Option<TlsConfig>,
     metrics: Arc<GatewayMetrics>,
     config: watch::Receiver<Arc<LiveConfig>>,
-    jwt: Option<Arc<JwtValidator>>,
+    jwt: Option<Arc<MultiJwtValidator>>,
     /// Path to the SQLite audit DB for the /dashboard endpoint.
     /// None when audit is not SQLite or dashboard is disabled.
     audit_db: Option<String>,
@@ -99,7 +99,7 @@ impl HttpTransport {
         tls: Option<TlsConfig>,
         metrics: Arc<GatewayMetrics>,
         config: watch::Receiver<Arc<LiveConfig>>,
-        jwt: Option<Arc<JwtValidator>>,
+        jwt: Option<Arc<MultiJwtValidator>>,
         audit_db: Option<String>,
         admin_token: Option<String>,
     ) -> Self {
@@ -113,7 +113,7 @@ struct HttpState {
     metrics: Arc<GatewayMetrics>,
     config: watch::Receiver<Arc<LiveConfig>>,
     /// Optional JWT validator — present when `auth.jwt` is configured.
-    jwt: Option<Arc<JwtValidator>>,
+    jwt: Option<Arc<MultiJwtValidator>>,
     audit_db: Option<String>,
     /// Optional Bearer token required to access /dashboard and /metrics.
     admin_token: Option<String>,

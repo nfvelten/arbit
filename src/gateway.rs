@@ -60,6 +60,7 @@ impl McpGateway {
     /// - `error_response`: `Some` = blocked (JSON-RPC error), `None` = allowed
     /// - `rate_limit_info`: present when a rate-limit check was performed (HTTP transport
     ///   uses this to populate `X-RateLimit-*` headers)
+    #[tracing::instrument(skip(self, msg), fields(method, tool))]
     pub async fn intercept_with_ip(
         &self,
         agent_id: &str,
@@ -67,6 +68,7 @@ impl McpGateway {
         client_ip: Option<String>,
     ) -> (Option<Value>, Option<RateLimitInfo>) {
         let method = msg["method"].as_str().unwrap_or("");
+        tracing::Span::current().record("method", method);
 
         if method != "tools/call" {
             self.audit.record(Arc::new(AuditEntry {
@@ -82,6 +84,9 @@ impl McpGateway {
 
         let id = msg["id"].clone();
         let tool_name = msg["params"]["name"].as_str().map(String::from);
+        if let Some(t) = &tool_name {
+            tracing::Span::current().record("tool", t.as_str());
+        }
         let arguments = Some(msg["params"]["arguments"].clone());
 
         let ctx = McpContext {
@@ -127,6 +132,7 @@ impl McpGateway {
 
     /// Policy check + upstream forwarding + response filtering.
     /// Returns `(response, rate_limit_info)` for the HTTP transport.
+    #[tracing::instrument(skip(self, msg))]
     pub async fn handle(
         &self,
         agent_id: &str,

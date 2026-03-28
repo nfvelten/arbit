@@ -122,25 +122,49 @@ Optional top-level field. When set, `/metrics` and `/dashboard` require an `Auth
 admin_token: "your-admin-secret"
 ```
 
-### `auth` (JWT / OIDC)
+### `auth` (JWT / OIDC / OAuth 2.1)
 
 Optional. When set, every `initialize` request must carry a valid JWT in the `Authorization: Bearer` header. The gateway rejects tokens without an `exp` claim.
+
+Accepts a single provider or a list — the first to successfully validate the token wins:
 
 ```yaml
 # HMAC (HS256) — shared secret
 auth:
-  hmac_secret: "your-signing-secret"
-  issuer: "https://auth.example.com"      # optional — validated if set
-  audience: "mcp-gateway"                 # optional — validated if set
+  secret: "your-signing-secret"
+  issuer: "https://auth.example.com"   # optional — validated if set
+  audience: "mcp-gateway"              # optional — validated if set
 
-# JWKS (RS256 / OIDC) — public key endpoint
+# JWKS (RS256 / OIDC) — explicit endpoint
 auth:
   jwks_url: "https://auth.example.com/.well-known/jwks.json"
   issuer: "https://auth.example.com"
   audience: "mcp-gateway"
+
+# Provider presets — OIDC discovery URL resolved automatically
+auth:
+  provider: google
+  audience: "my-oauth-client-id"
+
+# Multiple providers — any valid token is accepted
+auth:
+  - provider: google
+    audience: "my-client-id"
+  - provider: github-actions
+    audience: "https://github.com/myorg"
+  - provider: okta
+    issuer: "https://dev-123.okta.com"
+    audience: "api://default"
 ```
 
-`hmac_secret` and `jwks_url` are mutually exclusive. JWKS keys are fetched on startup and cached; the fetch has a 5-second timeout.
+| Provider | Issuer (auto-set) | Notes |
+|---|---|---|
+| `google` | `https://accounts.google.com` | Google Cloud / Firebase ID tokens |
+| `github-actions` | `https://token.actions.githubusercontent.com` | GitHub Actions OIDC tokens |
+| `auth0` | user-specified `issuer` required | Auth0 tenants |
+| `okta` | user-specified `issuer` required | Okta orgs |
+
+JWKS keys are fetched lazily, cached for 5 minutes, and refreshed on expiry. OIDC discovery documents are cached for the process lifetime.
 
 ### `upstreams`
 
@@ -392,6 +416,25 @@ kill -USR1 $(pidof gateway)
 
 No restart required. In-flight requests are not affected.
 
+## OpenTelemetry
+
+Export traces to any OTLP-compatible backend (Jaeger, Grafana Tempo, Honeycomb, Datadog, etc.):
+
+```yaml
+telemetry:
+  otlp_endpoint: "http://localhost:4317"   # gRPC OTLP
+  service_name: "mcp-gateway"              # optional, default: "mcp-gateway"
+```
+
+Every `tools/call` creates a span with `agent_id`, `method`, and `tool` attributes. Spans are exported in batches; any buffered spans are flushed on shutdown.
+
+```sh
+# Quick local test with Jaeger all-in-one
+docker run -p 4317:4317 -p 16686:16686 jaegertracing/all-in-one
+LOG_LEVEL=debug ./gateway gateway.yml
+open http://localhost:16686
+```
+
 ## Logging
 
 Control log format and level via environment variables:
@@ -467,7 +510,7 @@ Each middleware is a trait object — new checks can be added without touching t
 ## Tests
 
 ```sh
-# Unit tests (103 tests)
+# Unit tests (112 tests)
 cargo test
 
 # HTTP integration tests (35 checks)
