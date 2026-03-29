@@ -32,11 +32,11 @@ fn parse_args() -> Result<Opts, String> {
     let mut limit = 50usize;
 
     // First positional arg (if not a flag) is the db path
-    if let Some(first) = args.peek() {
-        if !first.starts_with("--") {
-            db_path = first.clone();
-            args.next();
-        }
+    if let Some(first) = args.peek()
+        && !first.starts_with("--")
+    {
+        db_path = first.clone();
+        args.next();
     }
 
     while let Some(arg) = args.next() {
@@ -177,10 +177,7 @@ fn run_query(opts: &Opts) -> anyhow::Result<()> {
 
     // ── Table ─────────────────────────────────────────────────────────────────
 
-    println!(
-        "\n{:<14} {:<16} {:<18} {:<22} {:<10} {}",
-        "AGE", "AGENT", "METHOD", "TOOL", "OUTCOME", "REASON"
-    );
+    println!("\n{:<14} {:<16} {:<18} {:<22} {:<10} REASON", "AGE", "AGENT", "METHOD", "TOOL", "OUTCOME");
     println!("{}", "─".repeat(110));
 
     for (ts, agent, method, tool, outcome, reason) in &rows {
@@ -235,9 +232,9 @@ fn format_age(ts: i64, now: i64) -> String {
 }
 
 fn format_duration(secs: u64) -> String {
-    if secs % 86400 == 0 { format!("{}d", secs / 86400) }
-    else if secs % 3600 == 0 { format!("{}h", secs / 3600) }
-    else if secs % 60 == 0 { format!("{}m", secs / 60) }
+    if secs.is_multiple_of(86400) { format!("{}d", secs / 86400) }
+    else if secs.is_multiple_of(3600) { format!("{}h", secs / 3600) }
+    else if secs.is_multiple_of(60) { format!("{}m", secs / 60) }
     else { format!("{secs}s") }
 }
 

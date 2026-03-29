@@ -40,15 +40,19 @@ async fn main() -> anyhow::Result<()> {
 
     // New-style `audits:` list
     for backend_cfg in &config.audits {
-        if let AuditConfig::Sqlite { path, .. } = backend_cfg {
-            if sqlite_db_path.is_none() { sqlite_db_path = Some(path.clone()); }
+        if let AuditConfig::Sqlite { path, .. } = backend_cfg
+            && sqlite_db_path.is_none()
+        {
+            sqlite_db_path = Some(path.clone());
         }
         audit_backends.push(build_audit_backend(backend_cfg)?);
     }
     // Legacy `audit:` single backend (backward compat)
     if let Some(backend_cfg) = &config.audit {
-        if let AuditConfig::Sqlite { path, .. } = backend_cfg {
-            if sqlite_db_path.is_none() { sqlite_db_path = Some(path.clone()); }
+        if let AuditConfig::Sqlite { path, .. } = backend_cfg
+            && sqlite_db_path.is_none()
+        {
+            sqlite_db_path = Some(path.clone());
         }
         audit_backends.push(build_audit_backend(backend_cfg)?);
     }

@@ -93,6 +93,7 @@ pub struct HttpTransport {
 }
 
 impl HttpTransport {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         addr: impl Into<String>,
         session_ttl_secs: u64,
@@ -219,13 +220,13 @@ fn insert_rl_headers(res: &mut axum::response::Response, rl: &crate::middleware:
             headers.insert(n, v);
         }
     }
-    if rl.remaining == 0 {
-        if let (Ok(n), Ok(v)) = (
+    if rl.remaining == 0
+        && let (Ok(n), Ok(v)) = (
             axum::http::HeaderName::from_bytes(b"retry-after"),
             HeaderValue::from_str(&rl.reset_after_secs.to_string()),
-        ) {
-            headers.insert(n, v);
-        }
+        )
+    {
+        headers.insert(n, v);
     }
 }
 
@@ -253,36 +254,35 @@ async fn handle_mcp(
         // JWT auth: if a JwtValidator is configured and the request carries
         // Authorization: Bearer <token>, validate it and use the token's claim
         // as the agent identity. api_key and clientInfo.name are both ignored.
-        if let Some(validator) = &state.jwt {
-            if let Some(bearer) = headers
+        if let Some(validator) = &state.jwt
+            && let Some(bearer) = headers
                 .get("authorization")
                 .and_then(|v| v.to_str().ok())
                 .and_then(|v| v.strip_prefix("Bearer "))
-            {
-                match validator.validate(bearer).await {
-                    Ok(agent_name) => {
-                        let session_id = state.sessions.create(agent_name.clone()).await;
-                        tracing::info!(session_id, agent = agent_name, "JWT session created");
-                        let (response, rl, request_id) = state.gateway.handle(&agent_name, msg, client_ip).await;
-                        return match response {
-                            Some(body) => {
-                                let mut res = Json(body).into_response();
-                                if let Ok(val) = HeaderValue::from_str(&session_id) {
-                                    res.headers_mut().insert("mcp-session-id", val);
-                                }
-                                if let Ok(val) = HeaderValue::from_str(&request_id) {
-                                    res.headers_mut().insert("x-request-id", val);
-                                }
-                                if let Some(rl) = &rl { insert_rl_headers(&mut res, rl); }
-                                res
+        {
+            match validator.validate(bearer).await {
+                Ok(agent_name) => {
+                    let session_id = state.sessions.create(agent_name.clone()).await;
+                    tracing::info!(session_id, agent = agent_name, "JWT session created");
+                    let (response, rl, request_id) = state.gateway.handle(&agent_name, msg, client_ip).await;
+                    return match response {
+                        Some(body) => {
+                            let mut res = Json(body).into_response();
+                            if let Ok(val) = HeaderValue::from_str(&session_id) {
+                                res.headers_mut().insert("mcp-session-id", val);
                             }
-                            None => StatusCode::ACCEPTED.into_response(),
-                        };
-                    }
-                    Err(e) => {
-                        tracing::warn!(error = %e, "JWT validation failed");
-                        return StatusCode::UNAUTHORIZED.into_response();
-                    }
+                            if let Ok(val) = HeaderValue::from_str(&request_id) {
+                                res.headers_mut().insert("x-request-id", val);
+                            }
+                            if let Some(rl) = &rl { insert_rl_headers(&mut res, rl); }
+                            res
+                        }
+                        None => StatusCode::ACCEPTED.into_response(),
+                    };
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "JWT validation failed");
+                    return StatusCode::UNAUTHORIZED.into_response();
                 }
             }
         }
@@ -307,11 +307,11 @@ async fn handle_mcp(
                 }
             } else {
                 // No key: use claimed name, but reject if the agent requires a key
-                if let Some(policy) = cfg.agents.get(claimed_name) {
-                    if policy.api_key.is_some() {
-                        tracing::warn!(agent = claimed_name, "api_key required but not provided");
-                        return StatusCode::UNAUTHORIZED.into_response();
-                    }
+                if let Some(policy) = cfg.agents.get(claimed_name)
+                    && policy.api_key.is_some()
+                {
+                    tracing::warn!(agent = claimed_name, "api_key required but not provided");
+                    return StatusCode::UNAUTHORIZED.into_response();
                 }
                 claimed_name.to_string()
             }
@@ -443,7 +443,8 @@ async fn handle_dashboard(
     };
 
     let db_path = db_path.clone();
-    let rows: Vec<(i64, String, String, Option<String>, String, Option<String>)> =
+    type AuditRow = (i64, String, String, Option<String>, String, Option<String>);
+    let rows: Vec<AuditRow> =
         tokio::time::timeout(
             std::time::Duration::from_secs(5),
             tokio::task::spawn_blocking(move || {
@@ -626,10 +627,10 @@ async fn sse_proxy(
                 let raw = buf[..pos].to_string();
                 buf = buf[pos + 2..].to_string();
 
-                if let Some(event) = parse_and_filter_sse(&raw, &config_rx) {
-                    if tx.send(Ok(event)).await.is_err() {
-                        return; // client disconnected
-                    }
+                if let Some(event) = parse_and_filter_sse(&raw, &config_rx)
+                    && tx.send(Ok(event)).await.is_err()
+                {
+                    return; // client disconnected
                 }
             }
         }

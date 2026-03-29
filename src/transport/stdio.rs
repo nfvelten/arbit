@@ -76,11 +76,11 @@ impl Transport for StdioTransport {
                 }
             };
 
-            if msg["method"].as_str() == Some("initialize") {
-                if let Some(name) = msg["params"]["clientInfo"]["name"].as_str() {
-                    tracing::info!(agent = name, "agent identified");
-                    *agent_id.lock().await = name.to_string();
-                }
+            if msg["method"].as_str() == Some("initialize")
+                && let Some(name) = msg["params"]["clientInfo"]["name"].as_str()
+            {
+                tracing::info!(agent = name, "agent identified");
+                *agent_id.lock().await = name.to_string();
             }
 
             let current_agent = agent_id.lock().await.clone();

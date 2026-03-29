@@ -396,14 +396,14 @@ impl Config {
 
         // Validate agent upstream references exist in upstreams map
         for (agent, policy) in &self.agents {
-            if let Some(upstream_name) = &policy.upstream {
-                if !self.upstreams.contains_key(upstream_name) {
-                    return Err(anyhow::anyhow!(
-                        "agent '{}' references unknown upstream '{}'",
-                        agent,
-                        upstream_name
-                    ));
-                }
+            if let Some(upstream_name) = &policy.upstream
+                && !self.upstreams.contains_key(upstream_name)
+            {
+                return Err(anyhow::anyhow!(
+                    "agent '{}' references unknown upstream '{}'",
+                    agent,
+                    upstream_name
+                ));
             }
         }
 
@@ -418,10 +418,10 @@ impl Config {
         }
 
         // Validate circuit breaker threshold is non-zero
-        if let TransportConfig::Http { circuit_breaker: cb, .. } = &self.transport {
-            if cb.threshold == 0 {
-                return Err(anyhow::anyhow!("circuit_breaker.threshold must be > 0"));
-            }
+        if let TransportConfig::Http { circuit_breaker: cb, .. } = &self.transport
+            && cb.threshold == 0
+        {
+            return Err(anyhow::anyhow!("circuit_breaker.threshold must be > 0"));
         }
 
         Ok(())

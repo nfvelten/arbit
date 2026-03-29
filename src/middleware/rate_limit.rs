@@ -8,6 +8,8 @@ use std::{
 };
 use tokio::sync::{watch, Mutex};
 
+type ToolCounts = Arc<Mutex<HashMap<(String, String), Vec<Instant>>>>;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -185,7 +187,7 @@ pub struct RateLimitMiddleware {
     /// Per-agent sliding window counters — keyed by agent_id.
     counts: Arc<Mutex<HashMap<String, Vec<Instant>>>>,
     /// Per-(agent, tool) sliding window counters for tool_rate_limits.
-    tool_counts: Arc<Mutex<HashMap<(String, String), Vec<Instant>>>>,
+    tool_counts: ToolCounts,
     /// Per-IP sliding window counters (HTTP mode). Keyed by client IP string.
     ip_counts: Arc<Mutex<HashMap<String, Vec<Instant>>>>,
 }

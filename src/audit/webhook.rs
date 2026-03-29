@@ -61,10 +61,10 @@ impl WebhookAudit {
 #[async_trait]
 impl AuditLog for WebhookAudit {
     fn record(&self, entry: Arc<AuditEntry>) {
-        if let Ok(guard) = self.tx.lock() {
-            if let Some(tx) = guard.as_ref() {
-                let _ = tx.send(entry);
-            }
+        if let Ok(guard) = self.tx.lock()
+            && let Some(tx) = guard.as_ref()
+        {
+            let _ = tx.send(entry);
         }
     }
 

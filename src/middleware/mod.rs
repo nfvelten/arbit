@@ -55,6 +55,7 @@ impl Pipeline {
         Self::default()
     }
 
+    #[allow(clippy::should_implement_trait)]
     pub fn add(mut self, mw: Arc<dyn Middleware>) -> Self {
         self.middlewares.push(mw);
         self

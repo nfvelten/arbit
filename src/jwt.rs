@@ -136,10 +136,10 @@ impl JwtValidator {
 
         {
             let cache = self.jwks_cache.lock().await;
-            if let Some(c) = &*cache {
-                if c.fetched_at.elapsed() < JWKS_TTL {
-                    return Ok(Arc::new(c.keys.clone()));
-                }
+            if let Some(c) = &*cache
+                && c.fetched_at.elapsed() < JWKS_TTL
+            {
+                return Ok(Arc::new(c.keys.clone()));
             }
         }
 

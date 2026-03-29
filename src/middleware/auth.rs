@@ -136,13 +136,13 @@ impl Middleware for AuthMiddleware {
             };
         }
 
-        if let Some(allowed) = &policy.allowed_tools {
-            if !allowed.iter().any(|t| tool_matches(t, tool)) {
-                return Decision::Block {
-                    reason: format!("tool '{tool}' not in allowlist"),
-                    rl: None,
-                };
-            }
+        if let Some(allowed) = &policy.allowed_tools
+            && !allowed.iter().any(|t| tool_matches(t, tool))
+        {
+            return Decision::Block {
+                reason: format!("tool '{tool}' not in allowlist"),
+                rl: None,
+            };
         }
 
         Decision::Allow { rl: None }
