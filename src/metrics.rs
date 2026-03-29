@@ -11,8 +11,8 @@ impl GatewayMetrics {
 
         let requests = CounterVec::new(
             Opts::new(
-                "mcp_gateway_requests_total",
-                "Total requests processed by the gateway",
+                "mcp_shield_requests_total",
+                "Total requests processed by mcp-shield",
             ),
             &["agent", "outcome"],
         )?;

@@ -1,4 +1,4 @@
-# mcp-gateway
+# mcp-shield
 
 A security proxy that sits between AI agents and MCP servers. It enforces per-agent policies before any tool call reaches the upstream server.
 
@@ -6,7 +6,7 @@ A security proxy that sits between AI agents and MCP servers. It enforces per-ag
 Agent (Cursor, Claude, etc.)
         │  JSON-RPC
         ▼
-  mcp-gateway          ← auth, rate limit, payload filter, audit
+  mcp-shield          ← auth, rate limit, payload filter, audit
         │
         ▼
   MCP Server (filesystem, database, APIs...)
@@ -35,7 +35,7 @@ Agent (Cursor, Claude, etc.)
 ## Installation
 
 ```sh
-cargo install mcp-gateway
+cargo install mcp-shield
 ```
 
 Or build from source (requires Rust 1.85+):
@@ -136,13 +136,13 @@ Accepts a single provider or a list — the first to successfully validate the t
 auth:
   secret: "your-signing-secret"
   issuer: "https://auth.example.com"   # optional — validated if set
-  audience: "mcp-gateway"              # optional — validated if set
+  audience: "mcp-shield"               # optional — validated if set
 
 # JWKS (RS256 / OIDC) — explicit endpoint
 auth:
   jwks_url: "https://auth.example.com/.well-known/jwks.json"
   issuer: "https://auth.example.com"
-  audience: "mcp-gateway"
+  audience: "mcp-shield"
 
 # Provider presets — OIDC discovery URL resolved automatically
 auth:
@@ -398,11 +398,11 @@ curl http://localhost:4000/metrics -H "Authorization: Bearer admin-secret"
 ```
 
 ```
-# HELP mcp_gateway_requests_total Total requests processed by the gateway
-# TYPE mcp_gateway_requests_total counter
-mcp_gateway_requests_total{agent="cursor",outcome="allowed"} 12
-mcp_gateway_requests_total{agent="cursor",outcome="blocked"} 3
-mcp_gateway_requests_total{agent="claude-code",outcome="forwarded"} 8
+# HELP mcp_shield_requests_total Total requests processed by the gateway
+# TYPE mcp_shield_requests_total counter
+mcp_shield_requests_total{agent="cursor",outcome="allowed"} 12
+mcp_shield_requests_total{agent="cursor",outcome="blocked"} 3
+mcp_shield_requests_total{agent="claude-code",outcome="forwarded"} 8
 ```
 
 ## Health check
@@ -458,7 +458,7 @@ Export traces to any OTLP-compatible backend (Jaeger, Grafana Tempo, Honeycomb, 
 ```yaml
 telemetry:
   otlp_endpoint: "http://localhost:4317"   # gRPC OTLP
-  service_name: "mcp-gateway"              # optional, default: "mcp-gateway"
+  service_name: "mcp-shield"               # optional, default: "mcp-shield"
 ```
 
 Every `tools/call` creates a span with `agent_id`, `method`, and `tool` attributes. Spans are exported in batches; any buffered spans are flushed on shutdown.
@@ -525,7 +525,7 @@ Flags:
 
 ```
             ┌─────────────────────────────────┐
-            │           McpGateway            │
+            │            McpShield            │
             │                                 │
   request ──► Pipeline                        │
             │   1. RateLimitMiddleware        │

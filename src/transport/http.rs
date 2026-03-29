@@ -498,7 +498,7 @@ async fn handle_dashboard(
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>mcp-gateway — audit dashboard</title>
+<title>mcp-shield — audit dashboard</title>
 <style>
   body {{ font-family: system-ui, sans-serif; margin: 0; background: #f5f5f5; color: #222; }}
   header {{ background: #1a1a2e; color: #fff; padding: 1rem 2rem; display: flex; align-items: center; gap: 1rem; }}
@@ -518,7 +518,7 @@ async fn handle_dashboard(
 </head>
 <body>
 <header>
-  <h1>mcp-gateway</h1>
+  <h1>mcp-shield</h1>
   <span>audit dashboard — last {total} entries</span>
 </header>
 <main>

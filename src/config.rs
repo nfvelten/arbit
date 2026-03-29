@@ -303,13 +303,13 @@ fn default_agent_claim() -> String {
 pub struct TelemetryConfig {
     /// OTLP gRPC endpoint (e.g. `http://localhost:4317`).
     pub otlp_endpoint: String,
-    /// `service.name` resource attribute. Defaults to `"mcp-gateway"`.
+    /// `service.name` resource attribute. Defaults to `"mcp-shield"`.
     #[serde(default = "default_service_name")]
     pub service_name: String,
 }
 
 fn default_service_name() -> String {
-    "mcp-gateway".to_string()
+    "mcp-shield".to_string()
 }
 
 // ── Rules ─────────────────────────────────────────────────────────────────────

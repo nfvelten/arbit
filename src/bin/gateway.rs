@@ -356,5 +356,5 @@ fn build_otel_tracer(
         .install_batch(Tokio)
         .map_err(|e| anyhow::anyhow!("OTLP pipeline: {e}"))?;
 
-    Ok(provider.tracer("mcp-gateway"))
+    Ok(provider.tracer("mcp-shield"))
 }
