@@ -13,6 +13,8 @@ pub struct AuditEntry {
     pub method: String,
     pub tool: Option<String>,
     pub outcome: Outcome,
+    /// Unique ID for this request — propagated as `X-Request-Id` response header.
+    pub request_id: String,
 }
 
 #[derive(Clone)]

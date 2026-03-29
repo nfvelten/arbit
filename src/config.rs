@@ -14,6 +14,9 @@ pub struct Config {
     pub audits: Vec<AuditConfig>,
     #[serde(default)]
     pub agents: HashMap<String, AgentPolicy>,
+    /// Fallback policy applied to agents not listed in `agents`.
+    /// Without this, unknown agents are blocked entirely.
+    pub default_policy: Option<AgentPolicy>,
     #[serde(default)]
     pub rules: Rules,
     /// Named upstream servers — agents can reference these by name via `upstream:` in their policy.
@@ -130,8 +133,10 @@ fn default_db_path() -> String {
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct AgentPolicy {
-    /// None = all tools allowed (except denied_tools)
+    /// None = all tools allowed (except denied_tools).
+    /// Entries may contain `*` as a glob wildcard (e.g. `read_*`, `fs/*`).
     pub allowed_tools: Option<Vec<String>>,
+    /// Entries may contain `*` as a glob wildcard.
     #[serde(default)]
     pub denied_tools: Vec<String>,
     #[serde(default = "default_rate_limit")]
@@ -143,10 +148,34 @@ pub struct AgentPolicy {
     pub upstream: Option<String>,
     /// Pre-shared API key. When set, the agent must send `X-Api-Key: <key>` on initialize.
     pub api_key: Option<String>,
+    /// Per-agent upstream timeout in seconds. Overrides the default 30s client timeout.
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
 }
 
 fn default_rate_limit() -> usize {
     60
+}
+
+/// Match a tool name against a pattern that may contain `*` as a wildcard.
+/// `*` matches zero or more characters. Multiple wildcards are supported.
+///
+/// Examples:
+/// - `"read_file"` matches only `"read_file"` (exact)
+/// - `"read_*"` matches `"read_file"`, `"read_dir"`, etc.
+/// - `"*"` matches any tool name
+pub(crate) fn tool_matches(pattern: &str, tool: &str) -> bool {
+    if !pattern.contains('*') {
+        return pattern == tool;
+    }
+    fn r#match(p: &[u8], t: &[u8]) -> bool {
+        match p.first() {
+            None => t.is_empty(),
+            Some(b'*') => (0..=t.len()).any(|i| r#match(&p[1..], &t[i..])),
+            Some(&c) => !t.is_empty() && t[0] == c && r#match(&p[1..], &t[1..]),
+        }
+    }
+    r#match(pattern.as_bytes(), tool.as_bytes())
 }
 
 // ── JWT / OIDC ────────────────────────────────────────────────────────────────
@@ -327,6 +356,7 @@ pub(crate) fn make_agent(
         tool_rate_limits: std::collections::HashMap::new(),
         upstream: None,
         api_key: None,
+        timeout_secs: None,
     }
 }
 
@@ -347,9 +377,12 @@ impl Config {
                 .map_err(|e| anyhow::anyhow!("invalid block_pattern '{}': {}", pattern, e))?;
         }
 
-        // Validate tool names contain only safe characters to prevent injection
-        let tool_name_re = Regex::new(r"^[a-zA-Z0-9_/.\-]+$").unwrap();
-        for (agent, policy) in &self.agents {
+        // Validate tool names contain only safe characters to prevent injection.
+        // '*' is allowed as a glob wildcard in allowed_tools and denied_tools patterns.
+        let tool_name_re = Regex::new(r"^[a-zA-Z0-9_/.\-*]+$").unwrap();
+        let all_policies = self.agents.iter().map(|(k, v)| (k.as_str(), v))
+            .chain(self.default_policy.as_ref().map(|p| ("default_policy", p)));
+        for (agent, policy) in all_policies {
             for tool in policy.allowed_tools.iter().flatten().chain(&policy.denied_tools) {
                 if !tool_name_re.is_match(tool) {
                     return Err(anyhow::anyhow!(
@@ -406,6 +439,7 @@ mod tests {
             audit: None,
             audits: vec![],
             agents: HashMap::new(),
+            default_policy: None,
             rules: Rules::default(),
             upstreams: HashMap::new(),
             auth: None,
@@ -549,5 +583,48 @@ mod tests {
         .unwrap();
         assert_eq!(cfg.secret.as_deref(), Some("s"));
         assert!(!cfg.oidc_discovery);
+    }
+
+    // ── tool_matches ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn exact_match() {
+        assert!(tool_matches("read_file", "read_file"));
+        assert!(!tool_matches("read_file", "write_file"));
+    }
+
+    #[test]
+    fn suffix_wildcard() {
+        assert!(tool_matches("read_*", "read_file"));
+        assert!(tool_matches("read_*", "read_dir"));
+        assert!(tool_matches("read_*", "read_"));
+        assert!(!tool_matches("read_*", "write_file"));
+    }
+
+    #[test]
+    fn prefix_wildcard() {
+        assert!(tool_matches("*_file", "read_file"));
+        assert!(tool_matches("*_file", "write_file"));
+        assert!(!tool_matches("*_file", "read_dir"));
+    }
+
+    #[test]
+    fn star_matches_all() {
+        assert!(tool_matches("*", "read_file"));
+        assert!(tool_matches("*", "anything"));
+        assert!(tool_matches("*", ""));
+    }
+
+    #[test]
+    fn middle_wildcard() {
+        assert!(tool_matches("read_*_v2", "read_file_v2"));
+        assert!(!tool_matches("read_*_v2", "read_file_v3"));
+    }
+
+    #[test]
+    fn wildcard_in_denied_tools_validation() {
+        let mut cfg = base();
+        cfg.agents.insert("a".to_string(), make_agent(Some(vec!["read_*", "list_*"]), vec!["delete_*"], 60));
+        assert!(cfg.validate().is_ok());
     }
 }

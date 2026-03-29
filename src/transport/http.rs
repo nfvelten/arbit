@@ -263,12 +263,15 @@ async fn handle_mcp(
                     Ok(agent_name) => {
                         let session_id = state.sessions.create(agent_name.clone()).await;
                         tracing::info!(session_id, agent = agent_name, "JWT session created");
-                        let (response, rl) = state.gateway.handle(&agent_name, msg, client_ip).await;
+                        let (response, rl, request_id) = state.gateway.handle(&agent_name, msg, client_ip).await;
                         return match response {
                             Some(body) => {
                                 let mut res = Json(body).into_response();
                                 if let Ok(val) = HeaderValue::from_str(&session_id) {
                                     res.headers_mut().insert("mcp-session-id", val);
+                                }
+                                if let Ok(val) = HeaderValue::from_str(&request_id) {
+                                    res.headers_mut().insert("x-request-id", val);
                                 }
                                 if let Some(rl) = &rl { insert_rl_headers(&mut res, rl); }
                                 res
@@ -316,12 +319,15 @@ async fn handle_mcp(
         let session_id = state.sessions.create(agent_name.clone()).await;
         tracing::info!(session_id, agent = agent_name, "session created");
 
-        let (response, rl) = state.gateway.handle(&agent_name, msg, client_ip).await;
+        let (response, rl, request_id) = state.gateway.handle(&agent_name, msg, client_ip).await;
         return match response {
             Some(body) => {
                 let mut res = Json(body).into_response();
                 if let Ok(val) = HeaderValue::from_str(&session_id) {
                     res.headers_mut().insert("mcp-session-id", val);
+                }
+                if let Ok(val) = HeaderValue::from_str(&request_id) {
+                    res.headers_mut().insert("x-request-id", val);
                 }
                 if let Some(rl) = &rl { insert_rl_headers(&mut res, rl); }
                 res
@@ -332,10 +338,13 @@ async fn handle_mcp(
 
     match resolve_agent(&state.sessions, &headers).await {
         Ok(agent_id) => {
-            let (response, rl) = state.gateway.handle(&agent_id, msg, client_ip).await;
+            let (response, rl, request_id) = state.gateway.handle(&agent_id, msg, client_ip).await;
             match response {
                 Some(body) => {
                     let mut res = Json(body).into_response();
+                    if let Ok(val) = HeaderValue::from_str(&request_id) {
+                        res.headers_mut().insert("x-request-id", val);
+                    }
                     if let Some(rl) = &rl { insert_rl_headers(&mut res, rl); }
                     res
                 }
@@ -362,13 +371,16 @@ async fn handle_delete_session(
     }
 }
 
-async fn handle_health() -> impl IntoResponse {
-    use axum::http::StatusCode;
+async fn handle_health(State(state): State<Arc<HttpState>>) -> impl IntoResponse {
+    let upstreams = state.gateway.upstreams_health().await;
+    let all_up = upstreams.values().all(|&v| v);
+    let status = if all_up { StatusCode::OK } else { StatusCode::SERVICE_UNAVAILABLE };
     (
-        StatusCode::OK,
+        status,
         Json(serde_json::json!({
-            "status": "ok",
-            "version": env!("CARGO_PKG_VERSION")
+            "status": if all_up { "ok" } else { "degraded" },
+            "version": env!("CARGO_PKG_VERSION"),
+            "upstreams": upstreams,
         })),
     )
 }
@@ -822,13 +834,13 @@ mod tests {
     // ── parse_and_filter_sse ─────────────────────────────────────────────────
 
     fn empty_config_rx() -> watch::Receiver<Arc<LiveConfig>> {
-        let (_, rx) = watch::channel(Arc::new(LiveConfig::new(HashMap::new(), vec![], vec![], None, FilterMode::Block)));
+        let (_, rx) = watch::channel(Arc::new(LiveConfig::new(HashMap::new(), vec![], vec![], None, FilterMode::Block, None)));
         rx
     }
 
     fn config_rx_with_pattern(pattern: &str) -> watch::Receiver<Arc<LiveConfig>> {
         let re = Regex::new(pattern).unwrap();
-        let (_, rx) = watch::channel(Arc::new(LiveConfig::new(HashMap::new(), vec![re], vec![], None, FilterMode::Block)));
+        let (_, rx) = watch::channel(Arc::new(LiveConfig::new(HashMap::new(), vec![re], vec![], None, FilterMode::Block, None)));
         rx
     }
 

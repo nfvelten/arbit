@@ -13,4 +13,9 @@ pub trait McpUpstream: Send + Sync {
     fn base_url(&self) -> &str {
         ""
     }
+    /// Returns `true` if the upstream is believed to be reachable.
+    /// For HTTP upstreams this reflects the circuit breaker state.
+    async fn is_healthy(&self) -> bool {
+        true
+    }
 }

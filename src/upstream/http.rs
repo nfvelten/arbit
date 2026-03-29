@@ -145,4 +145,8 @@ impl McpUpstream for HttpUpstream {
     fn base_url(&self) -> &str {
         &self.url
     }
+
+    async fn is_healthy(&self) -> bool {
+        !self.cb.is_open().await
+    }
 }

@@ -1,5 +1,5 @@
 use super::{Decision, McpContext, Middleware};
-use crate::live_config::LiveConfig;
+use crate::{config::tool_matches, live_config::LiveConfig};
 use async_trait::async_trait;
 use std::sync::Arc;
 use tokio::sync::watch;
@@ -11,7 +11,7 @@ mod tests {
     use std::collections::HashMap;
 
     fn make_mw(agents: HashMap<String, crate::config::AgentPolicy>) -> AuthMiddleware {
-        let live = Arc::new(LiveConfig::new(agents, vec![], vec![], None, FilterMode::Block));
+        let live = Arc::new(LiveConfig::new(agents, vec![], vec![], None, FilterMode::Block, None));
         let (_, rx) = watch::channel(live);
         AuthMiddleware::new(rx)
     }
@@ -122,14 +122,14 @@ impl Middleware for AuthMiddleware {
 
         let tool = ctx.tool_name.as_deref().unwrap_or("");
         let cfg = self.config.borrow();
-        let Some(policy) = cfg.agents.get(&ctx.agent_id) else {
+        let Some(policy) = cfg.agents.get(&ctx.agent_id).or(cfg.default_policy.as_ref()) else {
             return Decision::Block {
                 reason: format!("unknown agent '{}'", ctx.agent_id),
                 rl: None,
             };
         };
 
-        if policy.denied_tools.iter().any(|t| t == tool) {
+        if policy.denied_tools.iter().any(|t| tool_matches(t, tool)) {
             return Decision::Block {
                 reason: format!("tool '{tool}' explicitly denied"),
                 rl: None,
@@ -137,7 +137,7 @@ impl Middleware for AuthMiddleware {
         }
 
         if let Some(allowed) = &policy.allowed_tools {
-            if !allowed.iter().any(|t| t == tool) {
+            if !allowed.iter().any(|t| tool_matches(t, tool)) {
                 return Decision::Block {
                     reason: format!("tool '{tool}' not in allowlist"),
                     rl: None,

@@ -14,20 +14,23 @@ Agent (Cursor, Claude, etc.)
 
 ## What it does
 
-- **Auth** — each agent gets an explicit allowlist or denylist of tools; optional pre-shared API key or JWT/OIDC
-- **tools/list filtering** — agents only see the tools they are allowed to call
+- **Auth** — each agent gets an explicit allowlist or denylist of tools; glob wildcards supported (`read_*`, `fs/*`); optional pre-shared API key or JWT/OIDC
+- **tools/list filtering** — agents only see the tools they are allowed to call (wildcards respected)
 - **Rate limiting** — per-agent sliding window (calls/min) + per-tool limits + per-IP limit; standard `X-RateLimit-*` headers on every response
 - **Payload filtering** — block requests whose arguments match sensitive patterns (passwords, API keys, tokens)
 - **Response filtering** — block upstream responses that contain sensitive patterns before they reach the agent
-- **Audit log** — every request recorded; fan-out to multiple backends simultaneously (SQLite, webhook, stdout)
+- **Audit log** — every request recorded with a unique `X-Request-Id`; fan-out to multiple backends simultaneously (SQLite, webhook, stdout)
 - **Multiple upstreams** — route different agents to different MCP servers
 - **Circuit breaker** — upstream failures open the circuit; automatic half-open probe after recovery timeout
+- **Health check** — `GET /health` returns upstream status; `503` when any upstream is degraded
 - **Config hot-reload** — reload on `SIGUSR1` or automatically every 30 seconds without restart
 - **Metrics** — Prometheus-compatible `/metrics` endpoint
 - **Dashboard** — `/dashboard` audit viewer with per-agent filtering
 - **TLS** — optional HTTPS with certificate and key files
 - **SSE streaming** — `GET /mcp` proxies the upstream SSE stream with response filtering
 - **Transport agnostic** — works over HTTP+SSE or stdio; same config, same policies
+- **Default policy** — fallback policy for agents not listed in config; avoids hard-blocking unknown agents
+- **Per-agent timeout** — configurable upstream timeout per agent overrides the global 30s default
 
 ## Installation
 
@@ -190,14 +193,26 @@ Each key is an agent name matched against the `clientInfo.name` field in the MCP
 
 | Field | Description |
 |---|---|
-| `allowed_tools` | Allowlist — only these tools are reachable. Omit to allow all. |
-| `denied_tools` | Denylist — these tools are always blocked, even if in the allowlist. |
+| `allowed_tools` | Allowlist — only these tools are reachable. Omit to allow all. Supports glob wildcards (`read_*`, `*_file`, `fs/*`). |
+| `denied_tools` | Denylist — these tools are always blocked, even if in the allowlist. Supports glob wildcards. |
 | `rate_limit` | Max `tools/call` requests per minute. Default: 60. |
 | `tool_rate_limits` | Per-tool rate limits (calls/min). Checked in addition to `rate_limit`. |
 | `upstream` | Named upstream to use for this agent. Falls back to the default. |
 | `api_key` | Pre-shared API key. Agent must send `X-Api-Key: <key>` on `initialize`. Optional. |
+| `timeout_secs` | Upstream timeout in seconds for this agent. Overrides the default 30s. Optional. |
 
-Agents not listed in the config are blocked entirely.
+Agents not listed in the config are blocked entirely unless `default_policy` is set.
+
+### `default_policy`
+
+Optional top-level fallback applied to any agent not listed in `agents`. Useful when you want to allow unknown agents with baseline restrictions rather than hard-blocking them.
+
+```yaml
+default_policy:
+  denied_tools: [delete_file, drop_table]
+  rate_limit: 10
+  timeout_secs: 5
+```
 
 Example with api_key and tool_rate_limits:
 
@@ -390,6 +405,26 @@ mcp_gateway_requests_total{agent="cursor",outcome="blocked"} 3
 mcp_gateway_requests_total{agent="claude-code",outcome="forwarded"} 8
 ```
 
+## Health check
+
+```sh
+curl http://localhost:4000/health
+```
+
+```json
+{
+  "status": "ok",
+  "version": "0.7.0",
+  "upstreams": {
+    "default": true,
+    "filesystem": true,
+    "database": false
+  }
+}
+```
+
+Returns `200 OK` when all upstreams are healthy, `503 Service Unavailable` when any are degraded (circuit open). The status reflects the circuit breaker state — no extra probing requests are made.
+
 ## Dashboard
 
 The HTTP gateway exposes an audit dashboard at `/dashboard`:
@@ -510,7 +545,7 @@ Each middleware is a trait object — new checks can be added without touching t
 ## Tests
 
 ```sh
-# Unit tests (112 tests)
+# Unit tests (118 tests)
 cargo test
 
 # HTTP integration tests (35 checks)

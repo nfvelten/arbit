@@ -21,11 +21,12 @@ mod tests {
             tool_rate_limits: HashMap::new(),
             upstream: None,
             api_key: None,
+            timeout_secs: None,
         }
     }
 
     fn make_mw(agents: HashMap<String, AgentPolicy>, ip_limit: Option<usize>) -> RateLimitMiddleware {
-        let live = Arc::new(LiveConfig::new(agents, vec![], vec![], ip_limit, FilterMode::Block));
+        let live = Arc::new(LiveConfig::new(agents, vec![], vec![], ip_limit, FilterMode::Block, None));
         let (_, rx) = watch::channel(live);
         RateLimitMiddleware::new(rx)
     }
@@ -94,6 +95,7 @@ mod tests {
                 tool_rate_limits: tool_limits,
                 upstream: None,
                 api_key: None,
+                timeout_secs: None,
             },
         );
         let mw = make_mw(agents, None);

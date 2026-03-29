@@ -87,6 +87,7 @@ async fn main() -> anyhow::Result<()> {
         injection_patterns,
         config.rules.ip_rate_limit,
         config.rules.filter_mode,
+        config.default_policy,
     ));
     let (config_tx, config_rx) = watch::channel(live);
 
@@ -254,6 +255,7 @@ fn do_reload(
                 new_injection,
                 new_cfg.rules.ip_rate_limit,
                 new_cfg.rules.filter_mode,
+                new_cfg.default_policy,
             ));
             if tx.send(new_live).is_ok() {
                 tracing::info!(path = reload_path, "config reloaded");

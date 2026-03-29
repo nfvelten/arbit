@@ -1,5 +1,5 @@
 [package]
-name = "mcp-gateway"
+name = "mcp-shield"
 version = "0.7.0"
 edition = "2024"
 description = "Security proxy for MCP (Model Context Protocol) — auth, rate limiting, payload filtering, and audit logging between AI agents and MCP servers"
@@ -7,6 +7,10 @@ repository = "https://github.com/nfvelten/mcp-gateway"
 license = "Apache-2.0"
 keywords = ["mcp", "proxy", "security", "ai", "gateway"]
 categories = ["network-programming", "authentication"]
+
+[lib]
+name = "mcp_gateway"
+path = "src/lib.rs"
 
 [[bin]]
 name = "dummy-server"

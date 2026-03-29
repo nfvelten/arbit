@@ -1,14 +1,15 @@
 use crate::{
     audit::{AuditEntry, AuditLog, Outcome},
-    config::FilterMode,
+    config::{tool_matches, FilterMode},
     live_config::LiveConfig,
     metrics::GatewayMetrics,
     middleware::{Decision, McpContext, Pipeline, RateLimitInfo},
     upstream::McpUpstream,
 };
 use serde_json::{json, Value};
-use std::{collections::HashMap, sync::Arc, time::SystemTime};
+use std::{collections::HashMap, sync::Arc, time::{Duration, SystemTime}};
 use tokio::sync::watch;
+use uuid::Uuid;
 
 pub struct McpGateway {
     pipeline: Pipeline,
@@ -33,16 +34,28 @@ impl McpGateway {
         Self { pipeline, default_upstream, named_upstreams, audit, metrics, config }
     }
 
-    /// Select the upstream for a given agent. Falls back to the default.
+    /// Select the upstream for a given agent. Falls back to `default_policy`, then the default upstream.
     fn upstream_for(&self, agent_id: &str) -> &Arc<dyn McpUpstream> {
         let upstream_name = {
             let cfg = self.config.borrow();
-            cfg.agents.get(agent_id).and_then(|p| p.upstream.clone())
+            cfg.agents.get(agent_id)
+                .or(cfg.default_policy.as_ref())
+                .and_then(|p| p.upstream.clone())
         };
         upstream_name
             .as_ref()
             .and_then(|name| self.named_upstreams.get(name))
             .unwrap_or(&self.default_upstream)
+    }
+
+    /// Returns health status for all configured upstreams.
+    pub async fn upstreams_health(&self) -> HashMap<String, bool> {
+        let mut map = HashMap::new();
+        map.insert("default".to_string(), self.default_upstream.is_healthy().await);
+        for (name, up) in &self.named_upstreams {
+            map.insert(name.clone(), up.is_healthy().await);
+        }
+        map
     }
 
     /// Returns the upstream URL for an agent — used by the SSE proxy.
@@ -53,22 +66,26 @@ impl McpGateway {
     /// Check policy without forwarding. Returns `None` = allowed, `Some(error)` = blocked.
     /// Used by StdioTransport, which manages piping directly and doesn't need rate limit headers.
     pub async fn intercept(&self, agent_id: &str, msg: &Value) -> Option<Value> {
-        self.intercept_with_ip(agent_id, msg, None).await.0
+        let request_id = Uuid::new_v4().to_string();
+        self.intercept_with_ip(agent_id, msg, None, &request_id).await.0
     }
 
-    /// Returns `(error_response, rate_limit_info)`.
+    /// Returns `(error_response, rate_limit_info, request_id)`.
     /// - `error_response`: `Some` = blocked (JSON-RPC error), `None` = allowed
     /// - `rate_limit_info`: present when a rate-limit check was performed (HTTP transport
     ///   uses this to populate `X-RateLimit-*` headers)
-    #[tracing::instrument(skip(self, msg), fields(method, tool))]
+    /// - `request_id`: unique ID for this request, forwarded as `X-Request-Id` header
+    #[tracing::instrument(skip(self, msg), fields(method, tool, request_id))]
     pub async fn intercept_with_ip(
         &self,
         agent_id: &str,
         msg: &Value,
         client_ip: Option<String>,
+        request_id: &str,
     ) -> (Option<Value>, Option<RateLimitInfo>) {
         let method = msg["method"].as_str().unwrap_or("");
         tracing::Span::current().record("method", method);
+        tracing::Span::current().record("request_id", request_id);
 
         if method != "tools/call" {
             self.audit.record(Arc::new(AuditEntry {
@@ -77,6 +94,7 @@ impl McpGateway {
                 method: method.to_string(),
                 tool: None,
                 outcome: Outcome::Forwarded,
+                request_id: request_id.to_string(),
             }));
             self.metrics.record(agent_id, "forwarded");
             return (None, None);
@@ -105,6 +123,7 @@ impl McpGateway {
                     method: method.to_string(),
                     tool: tool_name,
                     outcome: Outcome::Allowed,
+                    request_id: request_id.to_string(),
                 }));
                 self.metrics.record(agent_id, "allowed");
                 (None, rl)
@@ -116,6 +135,7 @@ impl McpGateway {
                     method: method.to_string(),
                     tool: tool_name,
                     outcome: Outcome::Blocked(reason.clone()),
+                    request_id: request_id.to_string(),
                 }));
                 self.metrics.record(agent_id, "blocked");
                 (
@@ -131,19 +151,20 @@ impl McpGateway {
     }
 
     /// Policy check + upstream forwarding + response filtering.
-    /// Returns `(response, rate_limit_info)` for the HTTP transport.
+    /// Returns `(response, rate_limit_info, request_id)` for the HTTP transport.
     #[tracing::instrument(skip(self, msg))]
     pub async fn handle(
         &self,
         agent_id: &str,
         msg: Value,
         client_ip: Option<String>,
-    ) -> (Option<Value>, Option<RateLimitInfo>) {
+    ) -> (Option<Value>, Option<RateLimitInfo>, String) {
+        let request_id = Uuid::new_v4().to_string();
         let method = msg["method"].as_str().unwrap_or("").to_string();
 
-        let (err, rl) = self.intercept_with_ip(agent_id, &msg, client_ip).await;
+        let (err, rl) = self.intercept_with_ip(agent_id, &msg, client_ip, &request_id).await;
         if let Some(err) = err {
-            return (Some(err), rl);
+            return (Some(err), rl, request_id);
         }
 
         // In Redact mode, scrub block_patterns from the request arguments before forwarding.
@@ -160,32 +181,57 @@ impl McpGateway {
             }
         };
 
-        let response = self.upstream_for(agent_id).forward(&msg).await;
-        let response = if method == "tools/list" {
-            response.map(|r| self.filter_tools_response(agent_id, r))
+        // Per-agent timeout — overrides the default 30s client timeout.
+        let timeout = {
+            let cfg = self.config.borrow();
+            cfg.agents.get(agent_id)
+                .or(cfg.default_policy.as_ref())
+                .and_then(|p| p.timeout_secs)
+        };
+
+        let upstream = self.upstream_for(agent_id);
+        let forward_fut = upstream.forward(&msg);
+        let raw_response = if let Some(secs) = timeout {
+            match tokio::time::timeout(Duration::from_secs(secs), forward_fut).await {
+                Ok(r) => r,
+                Err(_) => {
+                    tracing::warn!(agent = agent_id, timeout_secs = secs, "upstream timeout");
+                    Some(json!({
+                        "jsonrpc": "2.0",
+                        "id": msg["id"],
+                        "error": { "code": -32603, "message": "upstream timeout" }
+                    }))
+                }
+            }
         } else {
-            response
+            forward_fut.await
+        };
+
+        let response = if method == "tools/list" {
+            raw_response.map(|r| self.filter_tools_response(agent_id, r))
+        } else {
+            raw_response
         };
         let response = response.map(|r| self.filter_response(r));
-        (response, rl)
+        (response, rl, request_id)
     }
 
     /// Filters the tools list in a `tools/list` response according to agent policy.
     /// Called by both HttpTransport and StdioTransport.
     pub fn filter_tools_response(&self, agent_id: &str, mut response: Value) -> Value {
         let cfg = self.config.borrow();
-        let Some(policy) = cfg.agents.get(agent_id) else {
+        let Some(policy) = cfg.agents.get(agent_id).or(cfg.default_policy.as_ref()) else {
             return response;
         };
 
         if let Some(tools) = response["result"]["tools"].as_array_mut() {
             tools.retain(|tool| {
                 let name = tool["name"].as_str().unwrap_or("");
-                if policy.denied_tools.iter().any(|t| t == name) {
+                if policy.denied_tools.iter().any(|t| tool_matches(t, name)) {
                     return false;
                 }
                 if let Some(allowed) = &policy.allowed_tools {
-                    return allowed.iter().any(|t| t == name);
+                    return allowed.iter().any(|t| tool_matches(t, name));
                 }
                 true
             });
@@ -303,7 +349,7 @@ mod tests {
     }
 
     fn make_gw(agents: HashMap<String, AgentPolicy>, patterns: Vec<Regex>) -> McpGateway {
-        let live = Arc::new(LiveConfig::new(agents, patterns, vec![], None, FilterMode::Block));
+        let live = Arc::new(LiveConfig::new(agents, patterns, vec![], None, FilterMode::Block, None));
         let (_, rx) = watch::channel(live);
         McpGateway::new(
             Pipeline::new(),

@@ -13,19 +13,19 @@ mod tests {
     use std::collections::HashMap;
 
     fn make_mw(patterns: Vec<Regex>) -> PayloadFilterMiddleware {
-        let live = Arc::new(LiveConfig::new(HashMap::new(), patterns, vec![], None, FilterMode::Block));
+        let live = Arc::new(LiveConfig::new(HashMap::new(), patterns, vec![], None, FilterMode::Block, None));
         let (_, rx) = watch::channel(live);
         PayloadFilterMiddleware::new(rx)
     }
 
     fn make_mw_redact(patterns: Vec<Regex>) -> PayloadFilterMiddleware {
-        let live = Arc::new(LiveConfig::new(HashMap::new(), patterns, vec![], None, FilterMode::Redact));
+        let live = Arc::new(LiveConfig::new(HashMap::new(), patterns, vec![], None, FilterMode::Redact, None));
         let (_, rx) = watch::channel(live);
         PayloadFilterMiddleware::new(rx)
     }
 
     fn make_mw_injection(injection: Vec<Regex>) -> PayloadFilterMiddleware {
-        let live = Arc::new(LiveConfig::new(HashMap::new(), vec![], injection, None, FilterMode::Block));
+        let live = Arc::new(LiveConfig::new(HashMap::new(), vec![], injection, None, FilterMode::Block, None));
         let (_, rx) = watch::channel(live);
         PayloadFilterMiddleware::new(rx)
     }
@@ -140,6 +140,7 @@ mod tests {
             injection,
             None,
             FilterMode::Redact,
+            None,
         ));
         let (_, rx) = watch::channel(live);
         let mw = PayloadFilterMiddleware::new(rx);
