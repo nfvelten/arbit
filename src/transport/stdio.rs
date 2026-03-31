@@ -1,5 +1,5 @@
 use super::Transport;
-use crate::gateway::McpGateway;
+use crate::{config::BinaryVerifyConfig, gateway::McpGateway, verify};
 use async_trait::async_trait;
 use serde_json::Value;
 use std::sync::Arc;
@@ -11,11 +11,12 @@ use tokio::{
 
 pub struct StdioTransport {
     server_cmd: Vec<String>,
+    verify: Option<BinaryVerifyConfig>,
 }
 
 impl StdioTransport {
-    pub fn new(server_cmd: Vec<String>) -> Self {
-        Self { server_cmd }
+    pub fn new(server_cmd: Vec<String>, verify: Option<BinaryVerifyConfig>) -> Self {
+        Self { server_cmd, verify }
     }
 }
 
@@ -26,6 +27,11 @@ impl Transport for StdioTransport {
             .server_cmd
             .split_first()
             .ok_or_else(|| anyhow::anyhow!("empty server_cmd"))?;
+
+        // Supply-chain check: verify binary before spawning it.
+        if let Some(cfg) = &self.verify {
+            verify::verify_binary(cmd, cfg).await?;
+        }
 
         let mut child = Command::new(cmd)
             .args(args)

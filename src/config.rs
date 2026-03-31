@@ -52,7 +52,39 @@ pub enum TransportConfig {
     },
     Stdio {
         server: Vec<String>,
+        /// Optional binary verification before spawn (supply-chain security).
+        #[serde(default)]
+        verify: Option<BinaryVerifyConfig>,
     },
+}
+
+/// Supply-chain verification settings for the stdio server binary.
+/// Both checks are optional and independent — configure one or both.
+///
+/// Example:
+/// ```yaml
+/// transport:
+///   type: stdio
+///   server: ["/usr/local/bin/mcp-server", "--data-dir", "/data"]
+///   verify:
+///     sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+///     cosign_bundle: "/etc/mcp/server.bundle"
+///     cosign_identity: "ci@example.com"
+///     cosign_issuer: "https://accounts.google.com"
+/// ```
+#[derive(Debug, Deserialize, Clone)]
+pub struct BinaryVerifyConfig {
+    /// Expected lowercase hex SHA-256 digest of the server binary.
+    /// Gateway startup is aborted if the binary on disk does not match.
+    pub sha256: Option<String>,
+    /// Path to a cosign bundle file produced by `cosign sign-blob --bundle`.
+    /// When set, `cosign verify-blob` is invoked before the server is spawned.
+    pub cosign_bundle: Option<String>,
+    /// Expected signer identity (email or SAN URI) for keyless cosign verification.
+    pub cosign_identity: Option<String>,
+    /// OIDC issuer URL for keyless cosign verification.
+    /// Example: `"https://token.actions.githubusercontent.com"`
+    pub cosign_issuer: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]

@@ -313,7 +313,7 @@ async fn cmd_start(config_path: String) -> anyhow::Result<()> {
             .serve(gateway)
             .await?;
         }
-        TransportConfig::Stdio { server } => {
+        TransportConfig::Stdio { server, verify } => {
             tracing::info!(server = %server.join(" "), "stdio mode");
             let gateway = Arc::new(McpGateway::new(
                 pipeline,
@@ -324,7 +324,7 @@ async fn cmd_start(config_path: String) -> anyhow::Result<()> {
                 config_rx,
                 schema_cache,
             ));
-            StdioTransport::new(server).serve(gateway).await?;
+            StdioTransport::new(server, verify).serve(gateway).await?;
         }
     }
 
