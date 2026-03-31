@@ -35,6 +35,7 @@ Agent (Cursor, Claude, etc.)
 - **Circuit breaker** — upstream failures open the circuit; automatic half-open probe after recovery timeout
 - **Health check** — `GET /health` returns upstream status; `503` when any upstream is degraded
 - **Config hot-reload** — reload on `SIGUSR1` or automatically every 30 seconds without restart
+- **Graceful shutdown** — SIGTERM and CTRL-C handled in both HTTP and stdio transports; active connections are drained, child process closed, and all audit backends flushed before exit — safe for Kubernetes `terminationGracePeriodSeconds`
 - **Secrets-safe config** — `${VAR}` interpolation in `gateway.yml` resolves env vars at startup; `ARBIT_ADMIN_TOKEN`, `ARBIT_UPSTREAM_URL`, `ARBIT_LISTEN_ADDR` override YAML values directly — compatible with Kubernetes Secrets, Vault Agent, External Secrets Operator, and any secret manager that injects env vars
 - **Cost Observability** — per-agent token estimation (4-chars-per-token heuristic); `arbit_tokens_total` Prometheus counter with `agent`/`direction` labels for chargeback dashboards; `input_tokens` stored in the SQLite audit log per request
 - **OpenLineage** — `openlineage` audit backend emits `RunEvent` (spec 2-0-2) per `tools/call`; `run.runId` correlates with `X-Request-Id`; enables LGPD/GDPR data lineage tracing ("agent X called tool Y which accessed Z")

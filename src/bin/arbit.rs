@@ -363,7 +363,9 @@ async fn cmd_start(config_path: String) -> anyhow::Result<()> {
         }
     }
 
+    tracing::info!("flushing audit backends");
     audit.flush().await;
+    tracing::info!("shutdown complete");
     Ok(())
 }
 
