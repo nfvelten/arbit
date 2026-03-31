@@ -10,7 +10,7 @@ A security proxy that sits between AI agents and MCP servers. It enforces per-ag
 Agent (Cursor, Claude, etc.)
         │  JSON-RPC
         ▼
-  arbit          ← auth, rate limit, payload filter, audit
+  arbit          ← auth, rate limit, HITL, payload filter, audit
         │
         ▼
   MCP Server (filesystem, database, APIs...)
@@ -21,10 +21,14 @@ Agent (Cursor, Claude, etc.)
 - **Auth** — each agent gets an explicit allowlist or denylist of tools; glob wildcards supported (`read_*`, `fs/*`); optional pre-shared API key or JWT/OIDC
 - **tools/list filtering** — agents only see the tools they are allowed to call (wildcards respected)
 - **Rate limiting** — per-agent sliding window (calls/min) + per-tool limits + per-IP limit; standard `X-RateLimit-*` headers on every response
+- **Human-in-the-Loop (HITL)** — tools in `approval_required` suspend execution until an operator approves or rejects via REST API; configurable timeout with auto-rejection
+- **Shadow mode** — tools in `shadow_tools` are intercepted and logged, but a mock success response is returned without forwarding to the upstream; useful for dry-running risky operations
 - **Payload filtering** — block requests whose arguments match sensitive patterns (passwords, API keys, tokens); encoding-aware: catches Base64, percent-encoded, double-encoded, and Unicode (Bidi/NFC) bypass attempts
 - **Response filtering** — block upstream responses that contain sensitive patterns before they reach the agent
 - **Schema validation** — `tools/call` arguments validated against the `inputSchema` from `tools/list`; invalid or unexpected fields are rejected before reaching the upstream
+- **Supply-chain security** — verify the MCP server binary before spawning it (stdio mode): SHA-256 hash pinning and/or `cosign verify-blob` (Sigstore transparency log); startup aborted on mismatch
 - **Audit log** — every request recorded with a unique `X-Request-Id`; fan-out to multiple backends simultaneously (SQLite, webhook, stdout)
+- **CloudEvents** — webhook audit backend can emit CNCF CloudEvents 1.0 envelopes (`application/cloudevents+json`), enabling direct ingestion by SIEMs (Splunk, Elastic, Datadog) without custom parsers
 - **Multiple upstreams** — route different agents to different MCP servers
 - **Circuit breaker** — upstream failures open the circuit; automatic half-open probe after recovery timeout
 - **Health check** — `GET /health` returns upstream status; `503` when any upstream is degraded
@@ -49,8 +53,6 @@ Download a pre-built binary for your platform from the [releases page](https://g
 | macOS Apple Silicon | `arbit-vX.Y.Z-aarch64-apple-darwin.tar.gz` |
 | Windows x64 | `arbit-vX.Y.Z-x86_64-pc-windows-msvc.zip` |
 
-Each archive contains `arbit` (the proxy) and `arbit-audit` (the CLI).
-
 Or install from crates.io (requires Rust 1.85+):
 
 ```sh
@@ -63,9 +65,8 @@ Or build from source:
 git clone https://github.com/nfvelten/arbit
 cd arbit
 cargo build --release
+# binary: target/release/arbit
 ```
-
-Binaries will be at `target/release/arbit` and `target/release/arbit-audit`.
 
 ### Docker
 
@@ -133,6 +134,7 @@ rules:
 | `tls.cert` | (HTTP only) path to PEM certificate file. Enables HTTPS when set. |
 | `tls.key` | (HTTP only) path to PEM private key file |
 | `server` | (stdio only) command to spawn the MCP server, as a list |
+| `verify` | (stdio only) optional binary verification before spawn — see [Supply-chain security](#supply-chain-security) |
 
 ### `admin_token`
 
@@ -217,6 +219,9 @@ Each key is an agent name matched against the `clientInfo.name` field in the MCP
 | `upstream` | Named upstream to use for this agent. Falls back to the default. |
 | `api_key` | Pre-shared API key. Agent must send `X-Api-Key: <key>` on `initialize`. Optional. |
 | `timeout_secs` | Upstream timeout in seconds for this agent. Overrides the default 30s. Optional. |
+| `approval_required` | List of tool patterns that require human approval before being forwarded. Supports glob wildcards. |
+| `hitl_timeout_secs` | Seconds to wait for a human decision before auto-rejecting. Default: 60. |
+| `shadow_tools` | List of tool patterns to intercept in shadow mode — logged but not forwarded to upstream. Supports glob wildcards. |
 
 Agents not listed in the config are blocked entirely unless `default_policy` is set.
 
@@ -231,17 +236,20 @@ default_policy:
   timeout_secs: 5
 ```
 
-Example with api_key and tool_rate_limits:
+Example with `api_key`, `tool_rate_limits`, HITL, and shadow mode:
 
 ```yaml
 agents:
   cursor:
-    allowed_tools: [read_file, write_file, list_directory]
+    allowed_tools: [read_file, write_file, list_directory, delete_file]
     rate_limit: 60
     tool_rate_limits:
       write_file: 5       # max 5 write_file calls/min, within the global 60/min
-      delete_file: 2
     api_key: "sk-cursor-secret"
+    approval_required:
+      - delete_file       # human must approve every delete
+    shadow_tools:
+      - "exec_*"          # intercept all exec_* tools silently
 ```
 
 ### `rules`
@@ -291,7 +299,7 @@ audits:
 | `type: sqlite` | Persist to a SQLite database at `path` |
 | `type: webhook` | POST each entry as JSON to `url` |
 
-Webhook config:
+#### Webhook — plain JSON
 
 ```yaml
 audit:
@@ -313,6 +321,41 @@ Payload sent on each request:
 }
 ```
 
+#### Webhook — CloudEvents 1.0
+
+Set `cloudevents: true` to emit [CNCF CloudEvents 1.0](https://cloudevents.io/) envelopes. The `Content-Type` header becomes `application/cloudevents+json`, enabling direct ingestion by SIEMs and event brokers without custom parsers.
+
+```yaml
+audit:
+  type: webhook
+  url: "https://hooks.splunk.example.com/mcp"
+  token: "splunk-hec-token"
+  cloudevents: true
+  source: "https://gateway.prod.example.com"  # optional, default: /arbit
+```
+
+CloudEvents envelope:
+
+```json
+{
+  "specversion": "1.0",
+  "type": "dev.arbit.audit.blocked",
+  "source": "https://gateway.prod.example.com",
+  "id": "req-abc-123",
+  "time": "2026-03-31T00:54:00Z",
+  "datacontenttype": "application/json",
+  "data": {
+    "agent_id": "cursor",
+    "method": "tools/call",
+    "tool": "write_file",
+    "outcome": "blocked",
+    "reason": "tool 'write_file' not in allowlist"
+  }
+}
+```
+
+Event types follow the reverse-DNS convention: `dev.arbit.audit.<outcome>` where outcome is `allowed`, `blocked`, `forwarded`, or `shadowed`.
+
 ## Usage
 
 ### HTTP mode
@@ -321,6 +364,8 @@ Start the gateway:
 
 ```sh
 ./arbit gateway.yml
+# or explicitly:
+./arbit start gateway.yml
 ```
 
 Agents connect to `http://localhost:4000/mcp`. The gateway forwards allowed requests to the upstream MCP server.
@@ -355,6 +400,102 @@ Retry-After: 38
 ```
 
 `X-RateLimit-Reset` and `Retry-After` are in seconds until the oldest request in the window ages out (≤ 60).
+
+### Human-in-the-Loop (HITL)
+
+Tools listed in `approval_required` are suspended until an operator takes action. The gateway holds the request open and waits up to `hitl_timeout_secs` (default: 60) before auto-rejecting.
+
+List pending approvals:
+
+```sh
+curl http://localhost:4000/approvals \
+  -H "Authorization: Bearer admin-secret"
+```
+
+```json
+[
+  {
+    "id": "appr-abc-123",
+    "agent_id": "cursor",
+    "tool_name": "delete_file",
+    "arguments": {"path": "/data/important.db"},
+    "created_at": 1743375600
+  }
+]
+```
+
+Approve or reject:
+
+```sh
+# Approve
+curl -X POST http://localhost:4000/approvals/appr-abc-123/approve \
+  -H "Authorization: Bearer admin-secret"
+
+# Reject with reason
+curl -X POST http://localhost:4000/approvals/appr-abc-123/reject \
+  -H "Authorization: Bearer admin-secret" \
+  -H "Content-Type: application/json" \
+  -d '{"reason": "not authorized during off-hours"}'
+```
+
+Both endpoints return `204 No Content` on success, `404` if the approval ID is unknown or already resolved.
+
+### Shadow mode
+
+Tools listed in `shadow_tools` are intercepted after all middleware passes. The gateway logs them as `shadowed`, returns a mock success response to the agent, and does **not** forward the call to the upstream server.
+
+This is useful for observing what a new agent would do with dangerous tools before granting real access.
+
+```yaml
+agents:
+  new-agent:
+    shadow_tools:
+      - delete_file
+      - "exec_*"
+```
+
+The agent receives:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": {
+    "content": [{"type": "text", "text": "[shadow] call intercepted — not forwarded to upstream"}]
+  }
+}
+```
+
+Shadowed calls appear in the audit log with `outcome: shadowed`.
+
+### Supply-chain security
+
+When using stdio transport, verify the MCP server binary before spawning it:
+
+```yaml
+transport:
+  type: stdio
+  server: ["/usr/local/bin/mcp-server", "--data-dir", "/data"]
+  verify:
+    sha256: "e3b0c44298fc1c149afbf4c8996fb924..."  # hex SHA-256 of the binary
+    cosign_bundle: "/etc/mcp/server.bundle"         # cosign bundle produced by `cosign sign-blob`
+    cosign_identity: "ci@example.com"               # expected signer identity (keyless)
+    cosign_issuer: "https://token.actions.githubusercontent.com"
+```
+
+Both `sha256` and `cosign_bundle` are optional and independent — configure one or both. If either check fails, the gateway aborts at startup before spawning the process.
+
+To generate a `sha256` for your binary:
+
+```sh
+sha256sum /usr/local/bin/mcp-server
+```
+
+To sign a binary with cosign (keyless, via GitHub Actions OIDC):
+
+```sh
+cosign sign-blob --bundle server.bundle /usr/local/bin/mcp-server
+```
 
 ### SSE streaming
 
@@ -400,10 +541,20 @@ transport:
 ```
 
 ```sh
-./gateway gateway-stdio.yml
+./arbit gateway-stdio.yml
 ```
 
 This is the mode used when configuring the gateway inside tools like Cursor or Claude Code — the editor talks to the gateway via stdio, and the gateway talks to the real server the same way.
+
+## Config validation
+
+Validate a config file without starting the gateway:
+
+```sh
+./arbit validate gateway.yml
+```
+
+Checks performed: regex syntax in `block_patterns`, upstream name references, TLS file paths, circuit breaker threshold, and tool name format.
 
 ## Metrics
 
@@ -420,6 +571,7 @@ curl http://localhost:4000/metrics -H "Authorization: Bearer admin-secret"
 # TYPE arbit_requests_total counter
 arbit_requests_total{agent="cursor",outcome="allowed"} 12
 arbit_requests_total{agent="cursor",outcome="blocked"} 3
+arbit_requests_total{agent="cursor",outcome="shadowed"} 2
 arbit_requests_total{agent="claude-code",outcome="forwarded"} 8
 ```
 
@@ -506,16 +658,16 @@ Query the audit log without opening SQLite directly:
 
 ```sh
 # Last 50 entries
-./arbit-audit gateway-audit.db
+./arbit audit gateway-audit.db
 
 # Only blocked requests in the last hour
-./arbit-audit gateway-audit.db --outcome blocked --since 1h
+./arbit audit gateway-audit.db --outcome blocked --since 1h
 
 # All activity from a specific agent
-./arbit-audit gateway-audit.db --agent cursor
+./arbit audit gateway-audit.db --agent cursor
 
 # Increase the row limit
-./arbit-audit gateway-audit.db --limit 200
+./arbit audit gateway-audit.db --limit 200
 ```
 
 Output:
@@ -525,9 +677,10 @@ AGE            AGENT            METHOD             TOOL                   OUTCOM
 ──────────────────────────────────────────────────────────────────────────────────────────────
 3s ago         cursor           tools/call         write_file             blocked    tool 'write_file' not in allowlist
 5s ago         cursor           tools/call         read_file              allowed
-7s ago         claude-code      tools/call         write_file             blocked    tool 'write_file' explicitly denied
+7s ago         cursor           tools/call         delete_file            shadowed
+9s ago         claude-code      tools/call         write_file             blocked    tool 'write_file' explicitly denied
 ──────────────────────────────────────────────────────────────────────────────────────────────
-Showing 3 of 3 total record(s) — since=1m, outcome=blocked
+Showing 4 of 4 total record(s) — since=1m
 ```
 
 Flags:
@@ -536,27 +689,30 @@ Flags:
 |---|---|
 | `--agent NAME` | Filter by agent name |
 | `--since DURATION` | Relative time window: `30s`, `5m`, `2h`, `7d` |
-| `--outcome VALUE` | `allowed`, `blocked`, or `forwarded` |
+| `--outcome VALUE` | `allowed`, `blocked`, `forwarded`, or `shadowed` |
 | `--limit N` | Max rows (default: 50) |
 
 ## Architecture
 
 ```
-            ┌─────────────────────────────────────┐
-            │              Arbit              │
-            │                                     │
-  request ──► Pipeline                            │
-            │   1. RateLimitMiddleware            │
-            │   2. AuthMiddleware                 │
-            │   3. SchemaValidationMiddleware     │
-            │   4. PayloadFilterMiddleware        │
-            │         │                           │
-            │    Allow/Block/Redact               │
-            │         │                           │
-            │   AuditLog + Metrics                │
-            │         │                           │
-            │    McpUpstream (per-agent)          │
-            └─────────────────────────────────────┘
+            ┌──────────────────────────────────────────┐
+            │                  Arbit                   │
+            │                                          │
+  request ──► Pipeline                                 │
+            │   1. RateLimitMiddleware                 │
+            │   2. AuthMiddleware                      │
+            │   3. HitlMiddleware    ← suspend & wait  │
+            │   4. SchemaValidationMiddleware          │
+            │   5. PayloadFilterMiddleware             │
+            │         │                               │
+            │    Allow / Block                        │
+            │         │                               │
+            │   Shadow mode check  ← mock if matched  │
+            │         │                               │
+            │   AuditLog + Metrics                    │
+            │         │                               │
+            │    McpUpstream (per-agent)              │
+            └──────────────────────────────────────────┘
 ```
 
 Each middleware is a trait object — new checks can be added without touching the gateway core. Transport, upstream, and audit backend are also trait objects, swappable via config.

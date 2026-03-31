@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.8.0] — 2026-03-31
+
+### Added
+- **Human-in-the-Loop (HITL)**: `HitlMiddleware` suspends `tools/call` requests matching `approval_required` patterns and waits for an operator decision via REST API (`GET /approvals`, `POST /approvals/{id}/approve`, `POST /approvals/{id}/reject`); auto-rejects after `hitl_timeout_secs` (default: 60)
+- **Shadow mode**: tools matching `shadow_tools` are intercepted after the middleware pipeline passes — logged as `Outcome::Shadowed`, a mock success response is returned, and the call is never forwarded to the upstream; supports glob wildcards
+- **Supply-chain security**: binary verification for the stdio transport before spawn; two independent checks: SHA-256 hash pinning (`verify.sha256`) and Sigstore cosign bundle (`verify.cosign_bundle` via `cosign verify-blob`); startup aborted on failure
+- **CloudEvents 1.0**: webhook audit backend gains `cloudevents: true` option; emits CNCF CloudEvents 1.0 envelopes (`application/cloudevents+json`) with event type `dev.arbit.audit.<outcome>`; configurable `source` attribute (default: `/arbit`)
+- **Unified CLI**: `arbit start`, `arbit validate`, and `arbit audit` subcommands replace the separate `arbit` and `arbit-audit` binaries; legacy `arbit gateway.yml` invocation still works
+- **`Outcome::Shadowed`** audit variant: all backends (SQLite, stdout, webhook) handle the new outcome
+
+### Changed
+- `AuditConfig::Webhook` gains `cloudevents: bool` (default: `false`) and `source: String` (default: `"/arbit"`) fields — fully backward compatible
+- `TransportConfig::Stdio` gains optional `verify: BinaryVerifyConfig` field
+
+---
+
 ## [0.7.0] — 2026-03-30
 
 ### Added
