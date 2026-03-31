@@ -2,6 +2,7 @@ pub mod audit;
 pub mod config;
 pub mod cost;
 pub mod decode;
+pub mod env_config;
 pub mod gateway;
 pub mod hitl;
 pub mod jwt;

@@ -459,12 +459,33 @@ pub(crate) fn make_agent(
 
 impl Config {
     pub fn from_file(path: &str) -> anyhow::Result<Self> {
-        let s = std::fs::read_to_string(path)
+        let raw = std::fs::read_to_string(path)
             .map_err(|e| anyhow::anyhow!("could not read '{}': {}", path, e))?;
-        let config: Self =
-            serde_yaml::from_str(&s).map_err(|e| anyhow::anyhow!("invalid config: {}", e))?;
+        let interpolated = crate::env_config::interpolate_env_vars(&raw)?;
+        let mut config: Self = serde_yaml::from_str(&interpolated)
+            .map_err(|e| anyhow::anyhow!("invalid config: {}", e))?;
+        crate::env_config::apply_env_overrides(&mut config);
         config.validate()?;
         Ok(config)
+    }
+
+    /// Override the upstream URL in the transport config.
+    /// No-op for stdio transport (no upstream URL concept).
+    pub fn set_upstream_url(&mut self, url: String) {
+        if let TransportConfig::Http { upstream, .. } = &mut self.transport {
+            *upstream = url;
+        }
+    }
+
+    /// Override the listen address in the transport config.
+    /// No-op for stdio transport.
+    pub fn set_listen_addr(&mut self, addr: String) {
+        if let TransportConfig::Http {
+            addr: current_addr, ..
+        } = &mut self.transport
+        {
+            *current_addr = addr;
+        }
     }
 
     fn validate(&self) -> anyhow::Result<()> {

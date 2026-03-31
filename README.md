@@ -35,6 +35,7 @@ Agent (Cursor, Claude, etc.)
 - **Circuit breaker** — upstream failures open the circuit; automatic half-open probe after recovery timeout
 - **Health check** — `GET /health` returns upstream status; `503` when any upstream is degraded
 - **Config hot-reload** — reload on `SIGUSR1` or automatically every 30 seconds without restart
+- **Secrets-safe config** — `${VAR}` interpolation in `gateway.yml` resolves env vars at startup; `ARBIT_ADMIN_TOKEN`, `ARBIT_UPSTREAM_URL`, `ARBIT_LISTEN_ADDR` override YAML values directly — compatible with Kubernetes Secrets, Vault Agent, External Secrets Operator, and any secret manager that injects env vars
 - **Cost Observability** — per-agent token estimation (4-chars-per-token heuristic); `arbit_tokens_total` Prometheus counter with `agent`/`direction` labels for chargeback dashboards; `input_tokens` stored in the SQLite audit log per request
 - **OpenLineage** — `openlineage` audit backend emits `RunEvent` (spec 2-0-2) per `tools/call`; `run.runId` correlates with `X-Request-Id`; enables LGPD/GDPR data lineage tracing ("agent X called tool Y which accessed Z")
 - **Metrics** — Prometheus-compatible `/metrics` endpoint
@@ -140,12 +141,50 @@ rules:
 | `server` | (stdio only) command to spawn the MCP server, as a list |
 | `verify` | (stdio only) optional binary verification before spawn — see [Supply-chain security](#supply-chain-security) |
 
+### Secrets in config
+
+Credentials should never be stored in plaintext. Two mechanisms are available:
+
+#### `${VAR}` interpolation
+
+Reference any environment variable inside `gateway.yml`:
+
+```yaml
+admin_token: "${ARBIT_ADMIN_TOKEN}"
+
+agents:
+  cursor:
+    api_key: "${CURSOR_API_KEY}"
+
+auth:
+  - type: jwt
+    secret: "${JWT_SECRET}"
+```
+
+If the variable is not set, arbit aborts at startup:
+
+```
+config error: env var 'ARBIT_ADMIN_TOKEN' is not set (referenced in gateway.yml)
+```
+
+#### `ARBIT_*` env var overrides
+
+Override specific fields without modifying the YAML file — useful when deploying a shared base config with environment-specific secrets:
+
+| Env var | Overrides |
+|---------|-----------|
+| `ARBIT_ADMIN_TOKEN` | `admin_token` |
+| `ARBIT_UPSTREAM_URL` | `transport.upstream` |
+| `ARBIT_LISTEN_ADDR` | `transport.addr` |
+
+These work with any secret manager that exposes secrets as env vars: Kubernetes Secrets (`envFrom`), Vault Agent, External Secrets Operator, OpenBao, Infisical, etc.
+
 ### `admin_token`
 
 Optional top-level field. When set, `/metrics` and `/dashboard` require an `Authorization: Bearer <token>` header. Without the header the endpoints return `403`.
 
 ```yaml
-admin_token: "your-admin-secret"
+admin_token: "${ARBIT_ADMIN_TOKEN}"   # recommended: inject via env var
 ```
 
 ### `auth` (JWT / OIDC / OAuth 2.1)

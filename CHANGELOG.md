@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.12.0] — 2026-03-31
+
+### Added
+- **Env var interpolation in config** (`${VAR}` syntax): any value in `gateway.yml` can reference an environment variable; missing variables abort startup with a descriptive error identifying the missing name — enables Kubernetes Secret injection without embedding credentials in config files
+- **`ARBIT_*` env var overrides**: three top-level overrides applied after YAML parsing; precedence: env var > YAML value:
+  - `ARBIT_ADMIN_TOKEN` — overrides `admin_token`
+  - `ARBIT_UPSTREAM_URL` — overrides `transport.upstream`
+  - `ARBIT_LISTEN_ADDR` — overrides `transport.addr`
+- `Config::set_upstream_url()` and `Config::set_listen_addr()` helper methods
+
+### Changed
+- `Config::from_file()` now runs interpolation and env overrides before `validate()` — fully backward compatible
+
+---
+
 ## [0.11.0] — 2026-03-31
 
 ### Added
