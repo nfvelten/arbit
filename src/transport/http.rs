@@ -1,6 +1,10 @@
 use super::Transport;
 use crate::{
-    config::TlsConfig, gateway::McpGateway, jwt::MultiJwtValidator, live_config::LiveConfig,
+    config::TlsConfig,
+    gateway::McpGateway,
+    hitl::{ApprovalDecision, HitlStore},
+    jwt::MultiJwtValidator,
+    live_config::LiveConfig,
     metrics::GatewayMetrics,
 };
 use async_trait::async_trait;
@@ -95,6 +99,7 @@ pub struct HttpTransport {
     audit_db: Option<String>,
     /// Optional Bearer token required to access /dashboard and /metrics.
     admin_token: Option<String>,
+    hitl_store: Arc<HitlStore>,
 }
 
 impl HttpTransport {
@@ -108,6 +113,7 @@ impl HttpTransport {
         jwt: Option<Arc<MultiJwtValidator>>,
         audit_db: Option<String>,
         admin_token: Option<String>,
+        hitl_store: Arc<HitlStore>,
     ) -> Self {
         Self {
             addr: addr.into(),
@@ -118,6 +124,7 @@ impl HttpTransport {
             jwt,
             audit_db,
             admin_token,
+            hitl_store,
         }
     }
 }
@@ -132,6 +139,7 @@ struct HttpState {
     audit_db: Option<String>,
     /// Optional Bearer token required to access /dashboard and /metrics.
     admin_token: Option<String>,
+    hitl_store: Arc<HitlStore>,
 }
 
 const MAX_AGENT_ID_LEN: usize = 128;
@@ -147,6 +155,7 @@ impl Transport for HttpTransport {
             jwt: self.jwt.clone(),
             audit_db: self.audit_db.clone(),
             admin_token: self.admin_token.clone(),
+            hitl_store: Arc::clone(&self.hitl_store),
         });
 
         let app = Router::new()
@@ -156,6 +165,9 @@ impl Transport for HttpTransport {
             .route("/metrics", get(handle_metrics))
             .route("/health", get(handle_health))
             .route("/dashboard", get(handle_dashboard))
+            .route("/approvals", get(handle_list_approvals))
+            .route("/approvals/{id}/approve", post(handle_approve))
+            .route("/approvals/{id}/reject", post(handle_reject))
             .with_state(state);
 
         if let Some(tls) = &self.tls {
@@ -565,6 +577,67 @@ async fn handle_dashboard(
         html,
     )
         .into_response()
+}
+
+// ── HITL approval endpoints ───────────────────────────────────────────────────
+
+/// GET /approvals — list all pending approvals waiting for operator action.
+async fn handle_list_approvals(
+    State(state): State<Arc<HttpState>>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if !check_admin_auth(&state, &headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    axum::Json(state.hitl_store.list().await).into_response()
+}
+
+/// POST /approvals/:id/approve — approve a pending tool call.
+async fn handle_approve(
+    State(state): State<Arc<HttpState>>,
+    headers: HeaderMap,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> impl IntoResponse {
+    if !check_admin_auth(&state, &headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    if state
+        .hitl_store
+        .resolve(&id, ApprovalDecision::Approved)
+        .await
+    {
+        StatusCode::NO_CONTENT.into_response()
+    } else {
+        StatusCode::NOT_FOUND.into_response()
+    }
+}
+
+#[derive(serde::Deserialize, Default)]
+struct RejectBody {
+    reason: Option<String>,
+}
+
+/// POST /approvals/:id/reject — reject a pending tool call.
+/// Optional JSON body: `{"reason": "..."}`.
+async fn handle_reject(
+    State(state): State<Arc<HttpState>>,
+    headers: HeaderMap,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    body: Option<axum::Json<RejectBody>>,
+) -> impl IntoResponse {
+    if !check_admin_auth(&state, &headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let reason = body.and_then(|b| b.reason.clone());
+    if state
+        .hitl_store
+        .resolve(&id, ApprovalDecision::Rejected { reason })
+        .await
+    {
+        StatusCode::NO_CONTENT.into_response()
+    } else {
+        StatusCode::NOT_FOUND.into_response()
+    }
 }
 
 fn chrono_ts(ts: i64) -> String {

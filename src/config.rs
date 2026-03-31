@@ -158,9 +158,20 @@ pub struct AgentPolicy {
     /// Per-agent upstream timeout in seconds. Overrides the default 30s client timeout.
     #[serde(default)]
     pub timeout_secs: Option<u64>,
+    /// Tools that require human approval before being forwarded to the upstream.
+    /// Supports the same glob syntax as `allowed_tools` / `denied_tools`.
+    #[serde(default)]
+    pub approval_required: Vec<String>,
+    /// Seconds to wait for a human decision before auto-rejecting. Default: 60.
+    #[serde(default = "default_hitl_timeout")]
+    pub hitl_timeout_secs: u64,
 }
 
 fn default_rate_limit() -> usize {
+    60
+}
+
+fn default_hitl_timeout() -> u64 {
     60
 }
 
@@ -370,6 +381,8 @@ pub(crate) fn make_agent(
         upstream: None,
         api_key: None,
         timeout_secs: None,
+        approval_required: vec![],
+        hitl_timeout_secs: 60,
     }
 }
 

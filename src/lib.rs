@@ -2,6 +2,7 @@ pub mod audit;
 pub mod config;
 pub mod decode;
 pub mod gateway;
+pub mod hitl;
 pub mod jwt;
 pub mod live_config;
 pub mod metrics;

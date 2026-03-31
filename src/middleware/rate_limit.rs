@@ -24,6 +24,8 @@ mod tests {
             upstream: None,
             api_key: None,
             timeout_secs: None,
+            approval_required: vec![],
+            hitl_timeout_secs: 60,
         }
     }
 
@@ -123,6 +125,8 @@ mod tests {
                 upstream: None,
                 api_key: None,
                 timeout_secs: None,
+                approval_required: vec![],
+                hitl_timeout_secs: 60,
             },
         );
         let mw = make_mw(agents, None);

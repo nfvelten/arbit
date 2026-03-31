@@ -1,4 +1,5 @@
 pub mod auth;
+pub mod hitl;
 pub mod payload_filter;
 pub mod rate_limit;
 pub mod schema_validation;

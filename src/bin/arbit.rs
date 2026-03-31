@@ -5,12 +5,14 @@ use arbit::{
     },
     config::{AuditConfig, Config, TelemetryConfig, TransportConfig},
     gateway::McpGateway,
+    hitl::HitlStore,
     jwt::MultiJwtValidator,
     live_config::LiveConfig,
     metrics::GatewayMetrics,
     middleware::{
-        Pipeline, auth::AuthMiddleware, payload_filter::PayloadFilterMiddleware,
-        rate_limit::RateLimitMiddleware, schema_validation::SchemaValidationMiddleware,
+        Pipeline, auth::AuthMiddleware, hitl::HitlMiddleware,
+        payload_filter::PayloadFilterMiddleware, rate_limit::RateLimitMiddleware,
+        schema_validation::SchemaValidationMiddleware,
     },
     prompt_injection,
     schema_cache::SchemaCache,
@@ -243,9 +245,14 @@ async fn cmd_start(config_path: String) -> anyhow::Result<()> {
 
     // ── Pipeline ──────────────────────────────────────────────────────────────
     let schema_cache = SchemaCache::new();
+    let hitl_store = HitlStore::new();
     let pipeline = Pipeline::new()
         .add(Arc::new(RateLimitMiddleware::new(config_rx.clone())))
         .add(Arc::new(AuthMiddleware::new(config_rx.clone())))
+        .add(Arc::new(HitlMiddleware::new(
+            Arc::clone(&hitl_store),
+            config_rx.clone(),
+        )))
         .add(Arc::new(SchemaValidationMiddleware::new(
             schema_cache.clone(),
         )))
@@ -301,6 +308,7 @@ async fn cmd_start(config_path: String) -> anyhow::Result<()> {
                 jwt,
                 sqlite_db_path,
                 config.admin_token,
+                hitl_store,
             )
             .serve(gateway)
             .await?;
