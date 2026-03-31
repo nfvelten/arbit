@@ -229,7 +229,7 @@ async fn shutdown_signal() {
     {
         tokio::signal::ctrl_c().await.ok();
     }
-    tracing::info!("shutdown signal received, draining audit");
+    tracing::info!("shutdown signal received, draining active connections");
 }
 
 // ── Rate-limit header helper ──────────────────────────────────────────────────
