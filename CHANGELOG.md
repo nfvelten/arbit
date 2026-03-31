@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.16.0] — 2026-03-31
+
+### Added
+- **Helm chart published to GitHub Pages**: `helm repo add arbit https://nfvelten.github.io/arbit` — chart is automatically packaged and published on every `v*` tag via `.github/workflows/helm-release.yml` using `helm/chart-releaser-action`
+- **Artifact Hub metadata**: `artifacthub-repo.yml` at repo root registers the repository with Artifact Hub for discoverability
+
+---
+
 ## [0.15.0] — 2026-03-31
 
 ### Added
