@@ -145,6 +145,10 @@ cargo test --lib           # all unit tests green
 
 Integration tests (`cargo test --test`) should also pass unless they require external services (stdio tests need `npx`).
 
+### Language
+
+Everything that goes into the public repository must be written in **English**: code, comments, commit messages, PR titles and descriptions, issue content, and documentation. Conversations with the developer may be in any language.
+
 ### Design principles
 
 - **Modularity** — new behaviour goes into its own module or middleware; avoid growing existing files beyond their scope
