@@ -152,6 +152,7 @@ mod tests {
             agent_id: "cursor".to_string(),
             method: "tools/call".to_string(),
             tool: Some("read_file".to_string()),
+            arguments: None,
             outcome,
             request_id: "req-abc-123".to_string(),
         })

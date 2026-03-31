@@ -116,6 +116,7 @@ impl McpGateway {
                 agent_id: agent_id.to_string(),
                 method: method.to_string(),
                 tool: None,
+                arguments: None,
                 outcome: Outcome::Forwarded,
                 request_id: request_id.to_string(),
             }));
@@ -134,7 +135,7 @@ impl McpGateway {
             agent_id: agent_id.to_string(),
             method: method.to_string(),
             tool_name: tool_name.clone(),
-            arguments,
+            arguments: arguments.clone(),
             client_ip,
         };
 
@@ -145,6 +146,7 @@ impl McpGateway {
                     agent_id: agent_id.to_string(),
                     method: method.to_string(),
                     tool: tool_name,
+                    arguments: arguments.clone(),
                     outcome: Outcome::Allowed,
                     request_id: request_id.to_string(),
                 }));
@@ -157,6 +159,7 @@ impl McpGateway {
                     agent_id: agent_id.to_string(),
                     method: method.to_string(),
                     tool: tool_name,
+                    arguments,
                     outcome: Outcome::Blocked(reason.clone()),
                     request_id: request_id.to_string(),
                 }));
@@ -219,6 +222,7 @@ impl McpGateway {
                     agent_id: agent_id.to_string(),
                     method: method.clone(),
                     tool: tool_name,
+                    arguments: Some(msg["params"]["arguments"].clone()),
                     outcome: Outcome::Shadowed,
                     request_id: request_id.clone(),
                 }));

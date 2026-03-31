@@ -21,6 +21,7 @@ use arbit::{
 };
 use clap::{Parser, Subcommand};
 use regex::Regex;
+use reqwest;
 use rusqlite::{Connection, types::Value};
 use std::{collections::HashMap, sync::Arc, time::Duration};
 use tokio::sync::watch;
@@ -79,6 +80,32 @@ enum Command {
         #[arg(long, default_value = "50")]
         limit: usize,
     },
+    /// Replay tool calls from the audit log against an upstream (time-travel debugging)
+    Replay {
+        /// Path to the SQLite audit database
+        #[arg(default_value = "gateway-audit.db")]
+        db: String,
+
+        /// Agent ID whose calls to replay
+        #[arg(long)]
+        agent: Option<String>,
+
+        /// Only replay calls from the last duration (e.g. 1h, 30m, 7d)
+        #[arg(long)]
+        since: Option<String>,
+
+        /// Target upstream URL to replay against (e.g. http://localhost:3000/mcp)
+        #[arg(long)]
+        upstream: Option<String>,
+
+        /// Print what would be sent without actually sending
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Max entries to replay
+        #[arg(long, default_value = "100")]
+        limit: usize,
+    },
 }
 
 // ── Entry point ────────────────────────────────────────────────────────────────
@@ -92,7 +119,7 @@ async fn main() -> anyhow::Result<()> {
         .map(|a| {
             matches!(
                 a.as_str(),
-                "start" | "validate" | "audit" | "--help" | "-h" | "--version" | "-V"
+                "start" | "validate" | "audit" | "replay" | "--help" | "-h" | "--version" | "-V"
             )
         })
         .unwrap_or(false);
@@ -114,6 +141,14 @@ async fn main() -> anyhow::Result<()> {
                 outcome,
                 limit,
             } => cmd_audit(db, agent, since, outcome, limit),
+            Command::Replay {
+                db,
+                agent,
+                since,
+                upstream,
+                dry_run,
+                limit,
+            } => cmd_replay(db, agent, since, upstream, dry_run, limit).await,
         };
     };
 
@@ -510,6 +545,135 @@ fn cmd_audit(
         rows.len(),
         total
     );
+    Ok(())
+}
+
+// ── replay ─────────────────────────────────────────────────────────────────────
+
+async fn cmd_replay(
+    db_path: String,
+    agent: Option<String>,
+    since: Option<String>,
+    upstream: Option<String>,
+    dry_run: bool,
+    limit: usize,
+) -> anyhow::Result<()> {
+    let since_secs = since.as_deref().map(parse_duration).transpose()?;
+
+    let conn = Connection::open(&db_path)?;
+    let now_ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+
+    let mut conditions = vec!["method = 'tools/call'".to_string(), "arguments IS NOT NULL".to_string()];
+    let mut binds: Vec<Value> = Vec::new();
+
+    if let Some(ref a) = agent {
+        conditions.push("agent_id = ?".to_string());
+        binds.push(Value::Text(a.clone()));
+    }
+    if let Some(since) = since_secs {
+        conditions.push("ts >= ?".to_string());
+        binds.push(Value::Integer(now_ts - since as i64));
+    }
+
+    let where_sql = format!("WHERE {}", conditions.join(" AND "));
+    let sql = format!(
+        "SELECT ts, agent_id, tool, arguments FROM audit_log {where_sql} ORDER BY ts ASC LIMIT {limit}"
+    );
+    let refs: Vec<&dyn rusqlite::types::ToSql> = binds.iter().map(|v| v as _).collect();
+
+    let mut stmt = conn.prepare(&sql)?;
+    let rows: Vec<(i64, String, Option<String>, String)> = stmt
+        .query_map(refs.as_slice(), |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    if rows.is_empty() {
+        println!("No tool calls found to replay.");
+        return Ok(());
+    }
+
+    let client = if !dry_run {
+        if upstream.is_none() {
+            anyhow::bail!("--upstream <url> is required unless --dry-run is specified");
+        }
+        Some(
+            reqwest::ClientBuilder::new()
+                .timeout(std::time::Duration::from_secs(30))
+                .build()?,
+        )
+    } else {
+        None
+    };
+
+    let upstream_url = upstream.as_deref().unwrap_or("<dry-run>");
+
+    println!(
+        "\nReplaying {} tool call(s) → {}\n",
+        rows.len(),
+        upstream_url
+    );
+
+    for (i, (ts, agent_id, tool, args_json)) in rows.iter().enumerate() {
+        let tool_name = tool.as_deref().unwrap_or("<unknown>");
+        let arguments: serde_json::Value = serde_json::from_str(args_json)
+            .unwrap_or(serde_json::Value::Null);
+
+        let age = format_age(*ts, now_ts);
+        println!(
+            "[{:>3}] {} | agent={} | tool={} | args={}",
+            i + 1,
+            age,
+            agent_id,
+            tool_name,
+            args_json
+        );
+
+        if dry_run {
+            continue;
+        }
+
+        let msg = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": i + 1,
+            "method": "tools/call",
+            "params": {
+                "name": tool_name,
+                "arguments": arguments
+            }
+        });
+
+        match client.as_ref().unwrap().post(upstream.as_ref().unwrap()).json(&msg).send().await {
+            Ok(resp) => {
+                let status = resp.status();
+                let body: serde_json::Value = resp.json().await.unwrap_or(serde_json::Value::Null);
+                if body.get("error").is_some() {
+                    println!("      → ERROR {}: {}", status, body["error"]["message"].as_str().unwrap_or("?"));
+                } else {
+                    println!("      → OK {}", status);
+                }
+            }
+            Err(e) => {
+                println!("      → FAILED: {e}");
+            }
+        }
+    }
+
+    if dry_run {
+        println!("\n(dry-run: no requests sent)");
+    } else {
+        println!("\nDone.");
+    }
+
     Ok(())
 }
 

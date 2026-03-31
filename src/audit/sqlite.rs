@@ -28,10 +28,13 @@ impl SqliteAudit {
                 agent_id  TEXT    NOT NULL,
                 method    TEXT    NOT NULL,
                 tool      TEXT,
+                arguments TEXT,
                 outcome   TEXT    NOT NULL,
                 reason    TEXT
             );",
         )?;
+        // Migrate existing databases that don't have the arguments column yet.
+        let _ = conn.execute_batch("ALTER TABLE audit_log ADD COLUMN arguments TEXT;");
         let conn = Arc::new(Mutex::new(conn));
         let (tx, mut rx) = mpsc::unbounded_channel::<Arc<AuditEntry>>();
 
@@ -81,14 +84,19 @@ impl SqliteAudit {
                 let conn = conn.clone();
                 tokio::task::spawn_blocking(move || {
                     if let Ok(c) = conn.lock() {
+                        let args_json = entry
+                            .arguments
+                            .as_ref()
+                            .and_then(|v| serde_json::to_string(v).ok());
                         if let Err(e) = c.execute(
-                            "INSERT INTO audit_log (ts, agent_id, method, tool, outcome, reason)
-                             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                            "INSERT INTO audit_log (ts, agent_id, method, tool, arguments, outcome, reason)
+                             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                             params![
                                 ts,
                                 entry.agent_id,
                                 entry.method,
                                 entry.tool,
+                                args_json,
                                 outcome_str,
                                 reason
                             ],
@@ -178,6 +186,7 @@ mod tests {
             agent_id: "agent-x".to_string(),
             method: "tools/call".to_string(),
             tool: Some("read_file".to_string()),
+            arguments: Some(serde_json::json!({"path": "/tmp/foo"})),
             outcome,
             request_id: "req-1".to_string(),
         })

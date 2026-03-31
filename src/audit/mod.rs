@@ -12,6 +12,8 @@ pub struct AuditEntry {
     pub agent_id: String,
     pub method: String,
     pub tool: Option<String>,
+    /// Tool arguments captured at intercept time — stored for replay.
+    pub arguments: Option<serde_json::Value>,
     pub outcome: Outcome,
     /// Unique ID for this request — propagated as `X-Request-Id` response header.
     pub request_id: String,

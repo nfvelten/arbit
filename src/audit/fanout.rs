@@ -73,6 +73,7 @@ mod tests {
             agent_id: "agent".to_string(),
             method: "tools/call".to_string(),
             tool: Some("do_thing".to_string()),
+            arguments: None,
             outcome,
             request_id: "req-1".to_string(),
         })
