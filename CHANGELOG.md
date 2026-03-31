@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.13.0] — 2026-03-31
+
+### Changed
+- **Graceful shutdown for stdio transport**: the main read loop now uses `tokio::select!` to race `stdin.next_line()` against SIGTERM/CTRL-C; on signal the loop breaks cleanly, the child process is drained, and the audit log is flushed before exit — previously SIGTERM killed the process immediately without flushing
+- **Shutdown log sequence**: `shutdown_signal()` (HTTP) now logs "draining active connections"; `arbit.rs` logs "flushing audit backends" and "shutdown complete" after transport exits — the audit flush is no longer misleadingly attributed to the signal handler
+
+---
+
 ## [0.12.0] — 2026-03-31
 
 ### Added

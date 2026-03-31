@@ -9,6 +9,25 @@ use tokio::{
     sync::Mutex,
 };
 
+/// Wait for SIGTERM (Unix) or CTRL-C (all platforms).
+/// Used by the stdio transport to break its read loop cleanly.
+async fn shutdown_signal_stdio() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        let mut sigterm =
+            signal(SignalKind::terminate()).expect("failed to install SIGTERM handler");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {},
+            _ = sigterm.recv() => {},
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        tokio::signal::ctrl_c().await.ok();
+    }
+}
+
 pub struct StdioTransport {
     server_cmd: Vec<String>,
     verify: Option<BinaryVerifyConfig>,
@@ -68,10 +87,26 @@ impl Transport for StdioTransport {
             }
         });
 
-        // Task B (main loop): our stdin → gateway intercept → child stdin or our stdout
+        // Task B (main loop): our stdin → gateway intercept → child stdin or our stdout.
+        // Exits cleanly on EOF *or* on SIGTERM/CTRL-C so the audit log is flushed before exit.
         let mut lines = BufReader::new(tokio::io::stdin()).lines();
+        let mut shutdown = std::pin::pin!(shutdown_signal_stdio());
 
-        while let Ok(Some(line)) = lines.next_line().await {
+        loop {
+            let line = tokio::select! {
+                result = lines.next_line() => {
+                    match result {
+                        Ok(Some(l)) => l,
+                        // EOF or read error — upstream process closed stdin
+                        _ => break,
+                    }
+                }
+                _ = &mut shutdown => {
+                    tracing::info!("shutdown signal received (stdio), draining child process");
+                    break;
+                }
+            };
+
             let line = line.trim().to_string();
             if line.is_empty() {
                 continue;
