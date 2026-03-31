@@ -1,0 +1,80 @@
+name: AI Code Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches: [master]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  review:
+    name: Claude Code Review
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get PR diff
+        id: diff
+        run: |
+          git diff origin/master...HEAD -- '*.rs' '*.toml' '*.yml' '*.yaml' '*.md' > pr_diff.txt
+          echo "lines=$(wc -l < pr_diff.txt)" >> "$GITHUB_OUTPUT"
+
+      - name: Review with Claude
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          REPO: ${{ github.repository }}
+        run: |
+          DIFF=$(cat pr_diff.txt)
+
+          PROMPT="You are a senior Rust engineer reviewing a pull request for **arbit** — a security proxy that sits between AI agents and MCP (Model Context Protocol) servers. It enforces auth, rate limiting, payload filtering, schema validation, and audit logging.
+
+          PR title: ${PR_TITLE}
+
+          Review the following diff and provide structured feedback. Focus on:
+          1. **Correctness** — logic errors, edge cases, off-by-one, race conditions
+          2. **Security** — any new attack surface, unsafe patterns, missing validation
+          3. **Performance** — unnecessary allocations, blocking calls in async context, N+1 patterns
+          4. **Rust idioms** — lifetime issues, error handling, use of unwrap/expect
+          5. **Test coverage** — missing test cases for the changed code
+
+          Be concise and actionable. Use inline code references. If the change looks good, say so briefly.
+
+          Format your response as GitHub Markdown suitable for a PR comment.
+
+          <diff>
+          ${DIFF}
+          </diff>"
+
+          RESPONSE=$(curl -s https://api.anthropic.com/v1/messages \
+            -H "x-api-key: ${ANTHROPIC_API_KEY}" \
+            -H "anthropic-version: 2023-06-01" \
+            -H "content-type: application/json" \
+            -d "$(jq -n \
+              --arg model "claude-sonnet-4-6" \
+              --arg prompt "$PROMPT" \
+              '{
+                model: $model,
+                max_tokens: 2048,
+                messages: [{"role": "user", "content": $prompt}]
+              }')")
+
+          REVIEW=$(echo "$RESPONSE" | jq -r '.content[0].text // "Review failed: " + .error.message')
+
+          COMMENT="## 🤖 AI Code Review
+
+          ${REVIEW}
+
+          ---
+          *Powered by Claude Sonnet — [arbit](https://github.com/${REPO})*"
+
+          gh pr comment "$PR_NUMBER" \
+            --repo "$REPO" \
+            --body "$COMMENT"
