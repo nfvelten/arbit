@@ -1158,3 +1158,238 @@ rules:
         "block pattern should be gone after reload, got: {body}"
     );
 }
+
+// ── Shadow mode ───────────────────────────────────────────────────────────────
+
+const SHADOW_CONFIG: &str = r#"agents:
+  shadow-agent:
+    rate_limit: 60
+    shadow_tools: [risky_write, "exec_*"]
+"#;
+
+#[tokio::test]
+async fn shadow_mode_returns_mock_not_upstream() {
+    let h = harness(SHADOW_CONFIG).await;
+    let (sid, _) = h.init("shadow-agent").await;
+    let resp = h
+        .json(Some(&sid), call_body("risky_write", json!({})))
+        .await;
+    // Mock response — no error, content contains [shadow]
+    assert!(resp["error"].is_null(), "unexpected error: {resp}");
+    let text = resp["result"]["content"][0]["text"].as_str().unwrap_or("");
+    assert!(
+        text.contains("[shadow]"),
+        "expected shadow mock, got: {text}"
+    );
+}
+
+#[tokio::test]
+async fn shadow_mode_glob_intercepts_matching_tools() {
+    let h = harness(SHADOW_CONFIG).await;
+    let (sid, _) = h.init("shadow-agent").await;
+    let resp = h.json(Some(&sid), call_body("exec_shell", json!({}))).await;
+    assert!(resp["error"].is_null());
+    let text = resp["result"]["content"][0]["text"].as_str().unwrap_or("");
+    assert!(text.contains("[shadow]"));
+}
+
+#[tokio::test]
+async fn shadow_mode_does_not_affect_normal_tools() {
+    let h = harness(SHADOW_CONFIG).await;
+    let (sid, _) = h.init("shadow-agent").await;
+    // echo is not in shadow_tools — should forward to dummy and get real response
+    let resp = h
+        .json(Some(&sid), call_body("echo", json!({"text": "ping"})))
+        .await;
+    let text = resp["result"]["content"][0]["text"].as_str().unwrap_or("");
+    assert_eq!(text, "echo: ping");
+}
+
+// ── HITL ──────────────────────────────────────────────────────────────────────
+
+const HITL_CONFIG: &str = r#"admin_token: "test-admin"
+agents:
+  hitl-agent:
+    allowed_tools: [echo]
+    approval_required: [echo]
+    hitl_timeout_secs: 5
+    rate_limit: 60
+"#;
+
+#[tokio::test]
+async fn hitl_approved_call_succeeds() {
+    let h = harness(HITL_CONFIG).await;
+    let (sid, _) = h.init("hitl-agent").await;
+
+    let port = h.port;
+    let sid2 = sid.clone();
+
+    // Kick off the tool call — it will suspend waiting for approval
+    let call = tokio::spawn(async move {
+        reqwest::Client::new()
+            .post(format!("http://127.0.0.1:{port}/mcp"))
+            .header("mcp-session-id", &sid2)
+            .json(&call_body("echo", json!({"text": "hello"})))
+            .send()
+            .await
+            .unwrap()
+            .json::<serde_json::Value>()
+            .await
+            .unwrap()
+    });
+
+    // Wait for the pending approval to appear
+    let admin = reqwest::Client::new();
+    let approval_id = {
+        let mut id = String::new();
+        for _ in 0..50 {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let list: serde_json::Value = admin
+                .get(format!("http://127.0.0.1:{port}/approvals"))
+                .header("Authorization", "Bearer test-admin")
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            if let Some(first) = list.as_array().and_then(|a| a.first()) {
+                id = first["id"].as_str().unwrap().to_string();
+                break;
+            }
+        }
+        assert!(!id.is_empty(), "no pending approval appeared");
+        id
+    };
+
+    // Approve
+    let status = admin
+        .post(format!(
+            "http://127.0.0.1:{port}/approvals/{approval_id}/approve"
+        ))
+        .header("Authorization", "Bearer test-admin")
+        .send()
+        .await
+        .unwrap()
+        .status()
+        .as_u16();
+    assert_eq!(status, 204);
+
+    let resp = call.await.unwrap();
+    assert!(
+        resp["result"].is_object(),
+        "expected result after approval, got: {resp}"
+    );
+}
+
+#[tokio::test]
+async fn hitl_rejected_call_is_blocked() {
+    let h = harness(HITL_CONFIG).await;
+    let (sid, _) = h.init("hitl-agent").await;
+
+    let port = h.port;
+    let sid2 = sid.clone();
+
+    let call = tokio::spawn(async move {
+        reqwest::Client::new()
+            .post(format!("http://127.0.0.1:{port}/mcp"))
+            .header("mcp-session-id", &sid2)
+            .json(&call_body("echo", json!({"text": "hello"})))
+            .send()
+            .await
+            .unwrap()
+            .json::<serde_json::Value>()
+            .await
+            .unwrap()
+    });
+
+    let admin = reqwest::Client::new();
+    let approval_id = {
+        let mut id = String::new();
+        for _ in 0..50 {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let list: serde_json::Value = admin
+                .get(format!("http://127.0.0.1:{port}/approvals"))
+                .header("Authorization", "Bearer test-admin")
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            if let Some(first) = list.as_array().and_then(|a| a.first()) {
+                id = first["id"].as_str().unwrap().to_string();
+                break;
+            }
+        }
+        assert!(!id.is_empty(), "no pending approval appeared");
+        id
+    };
+
+    // Reject with a reason
+    admin
+        .post(format!(
+            "http://127.0.0.1:{port}/approvals/{approval_id}/reject"
+        ))
+        .header("Authorization", "Bearer test-admin")
+        .header("content-type", "application/json")
+        .body(r#"{"reason":"off-hours policy"}"#)
+        .send()
+        .await
+        .unwrap();
+
+    let resp = call.await.unwrap();
+    assert!(
+        resp["error"].is_object(),
+        "expected error after rejection, got: {resp}"
+    );
+    let msg = resp["error"]["message"].as_str().unwrap_or("");
+    assert!(
+        msg.contains("rejected") || msg.contains("blocked"),
+        "unexpected message: {msg}"
+    );
+}
+
+#[tokio::test]
+async fn hitl_timeout_auto_rejects_call() {
+    // hitl_timeout_secs: 1 — do NOT approve, just wait
+    let config = r#"admin_token: "test-admin"
+agents:
+  hitl-agent:
+    allowed_tools: [echo]
+    approval_required: [echo]
+    hitl_timeout_secs: 1
+    rate_limit: 60
+"#;
+    let h = harness(config).await;
+    let (sid, _) = h.init("hitl-agent").await;
+
+    let resp = h
+        .json(Some(&sid), call_body("echo", json!({"text": "hello"})))
+        .await;
+    // Should auto-reject after 1 second
+    assert!(
+        resp["error"].is_object(),
+        "expected timeout error, got: {resp}"
+    );
+    let msg = resp["error"]["message"].as_str().unwrap_or("");
+    assert!(
+        msg.contains("timed out") || msg.contains("blocked"),
+        "unexpected message: {msg}"
+    );
+}
+
+#[tokio::test]
+async fn approvals_endpoint_requires_admin_token() {
+    let h = harness(HITL_CONFIG).await;
+    // Without token → 401
+    let status = h
+        .client
+        .get(h.url("/approvals"))
+        .send()
+        .await
+        .unwrap()
+        .status()
+        .as_u16();
+    assert_eq!(status, 401);
+}
