@@ -36,6 +36,7 @@ Agent (Cursor, Claude, etc.)
 - **Health check** — `GET /health` returns upstream status; `503` when any upstream is degraded
 - **Config hot-reload** — reload on `SIGUSR1` or automatically every 30 seconds without restart
 - **Cost Observability** — per-agent token estimation (4-chars-per-token heuristic); `arbit_tokens_total` Prometheus counter with `agent`/`direction` labels for chargeback dashboards; `input_tokens` stored in the SQLite audit log per request
+- **OpenLineage** — `openlineage` audit backend emits `RunEvent` (spec 2-0-2) per `tools/call`; `run.runId` correlates with `X-Request-Id`; enables LGPD/GDPR data lineage tracing ("agent X called tool Y which accessed Z")
 - **Metrics** — Prometheus-compatible `/metrics` endpoint
 - **Dashboard** — `/dashboard` audit viewer with per-agent filtering
 - **TLS** — optional HTTPS with certificate and key files
@@ -301,6 +302,7 @@ audits:
 | `type: stdout` | Print entries to stdout (default) |
 | `type: sqlite` | Persist to a SQLite database at `path` |
 | `type: webhook` | POST each entry as JSON to `url` |
+| `type: openlineage` | POST OpenLineage `RunEvent` to `url` |
 
 #### Webhook — plain JSON
 
@@ -358,6 +360,52 @@ CloudEvents envelope:
 ```
 
 Event types follow the reverse-DNS convention: `dev.arbit.audit.<outcome>` where outcome is `allowed`, `blocked`, `forwarded`, or `shadowed`.
+
+#### OpenLineage
+
+Emits an OpenLineage `RunEvent` (spec 2-0-2) for every `tools/call`. Enables data lineage tracing for LGPD/GDPR compliance: "agent X called tool Y which accessed Z".
+
+```yaml
+audit:
+  type: openlineage
+  url: "https://api.openlineage.io/api/v1/lineage"
+  token: "my-api-key"   # optional — sent as Bearer token
+  namespace: "arbit"    # optional — OpenLineage job.namespace, default: "arbit"
+```
+
+Or fan-out alongside other backends:
+
+```yaml
+audits:
+  - type: sqlite
+    path: "gateway-audit.db"
+  - type: openlineage
+    url: "https://marquez.internal/api/v1/lineage"
+    namespace: "prod-gateway"
+```
+
+Payload sent per `tools/call`:
+
+```json
+{
+  "eventType": "COMPLETE",
+  "eventTime": "2026-03-31T00:54:00Z",
+  "run": {
+    "runId": "550e8400-e29b-41d4-a716-446655440000",
+    "facets": {
+      "arbit:execution": { "outcome": "allowed", "agent": "cursor", "input_tokens": 12 },
+      "arbit:arguments": { "arguments": { "path": "/etc/hosts" } }
+    }
+  },
+  "job": { "namespace": "arbit", "name": "cursor/read_file", "facets": {} },
+  "inputs": [{ "namespace": "cursor", "name": "read_file" }],
+  "outputs": [],
+  "producer": "https://github.com/nfvelten/arbit",
+  "schemaURL": "https://openlineage.io/spec/2-0-2/OpenLineage.json#/definitions/RunEvent"
+}
+```
+
+`eventType` is `COMPLETE` for allowed/forwarded/shadowed and `FAIL` for blocked. The `run.runId` matches the `X-Request-Id` header so lineage events can be correlated with audit log entries.
 
 ## Usage
 

@@ -1,4 +1,5 @@
 pub mod fanout;
+pub mod openlineage;
 pub mod sqlite;
 pub mod stdout;
 pub mod webhook;

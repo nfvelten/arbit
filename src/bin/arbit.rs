@@ -1,7 +1,7 @@
 use arbit::{
     audit::{
-        AuditLog, fanout::FanoutAudit, sqlite::SqliteAudit, stdout::StdoutAudit,
-        webhook::WebhookAudit,
+        AuditLog, fanout::FanoutAudit, openlineage::OpenLineageAudit, sqlite::SqliteAudit,
+        stdout::StdoutAudit, webhook::WebhookAudit,
     },
     config::{AuditConfig, Config, TelemetryConfig, TransportConfig},
     gateway::McpGateway,
@@ -773,6 +773,18 @@ fn build_audit_backend(cfg: &AuditConfig) -> anyhow::Result<Arc<dyn AuditLog>> {
                 token.clone(),
                 *cloudevents,
                 source.clone(),
+            )))
+        }
+        AuditConfig::OpenLineage {
+            url,
+            token,
+            namespace,
+        } => {
+            tracing::info!(url, namespace, "openlineage audit");
+            Ok(Arc::new(OpenLineageAudit::new(
+                url,
+                token.clone(),
+                namespace.clone(),
             )))
         }
     }

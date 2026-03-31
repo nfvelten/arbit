@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.11.0] — 2026-03-31
+
+### Added
+- **OpenLineage Integration**: new `openlineage` audit backend emits OpenLineage `RunEvent` (spec 2-0-2) on every `tools/call`:
+  - `eventType` maps to `COMPLETE` (allowed/forwarded/shadowed) or `FAIL` (blocked)
+  - `job.namespace` / `job.name` encode `<namespace>/<agent_id>/<tool_name>` for lineage graph navigation
+  - `run.runId` is the existing `X-Request-Id` UUID — correlates lineage events with audit log entries
+  - `run.facets` includes `arbit:execution` (outcome, agent, input_tokens) and `arbit:arguments` (captured tool arguments)
+  - `inputs[]` dataset entry identifies the tool and agent as the lineage source
+  - Configurable `namespace`, optional Bearer token auth; non-tools/call events skipped automatically
+  - Enables LGPD/GDPR compliance tracing: "AI generated response X based on tool Y which queried Z"
+- **`AuditConfig::OpenLineage`** variant: `url`, `token` (optional), `namespace` (default: `"arbit"`) — fully backward compatible
+
+---
+
 ## [0.10.0] — 2026-03-31
 
 ### Added

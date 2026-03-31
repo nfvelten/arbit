@@ -171,10 +171,24 @@ pub enum AuditConfig {
         #[serde(default = "default_ce_source")]
         source: String,
     },
+    OpenLineage {
+        /// OpenLineage API endpoint (e.g. `https://api.openlineage.io/api/v1/lineage`).
+        url: String,
+        /// Optional Bearer token sent in the Authorization header.
+        token: Option<String>,
+        /// OpenLineage `job.namespace` — identifies this gateway instance.
+        /// Defaults to `"arbit"`.
+        #[serde(default = "default_ol_namespace")]
+        namespace: String,
+    },
 }
 
 fn default_ce_source() -> String {
     "/arbit".to_string()
+}
+
+fn default_ol_namespace() -> String {
+    "arbit".to_string()
 }
 
 fn default_db_path() -> String {
