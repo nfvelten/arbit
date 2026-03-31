@@ -165,6 +165,11 @@ pub struct AgentPolicy {
     /// Seconds to wait for a human decision before auto-rejecting. Default: 60.
     #[serde(default = "default_hitl_timeout")]
     pub hitl_timeout_secs: u64,
+    /// Tools that run in shadow mode: intercepted, logged, but NOT forwarded to the upstream.
+    /// The gateway returns a mock success response so the agent can continue normally.
+    /// Supports the same glob syntax as `allowed_tools` / `denied_tools`.
+    #[serde(default)]
+    pub shadow_tools: Vec<String>,
 }
 
 fn default_rate_limit() -> usize {
@@ -383,6 +388,7 @@ pub(crate) fn make_agent(
         timeout_secs: None,
         approval_required: vec![],
         hitl_timeout_secs: 60,
+        shadow_tools: vec![],
     }
 }
 

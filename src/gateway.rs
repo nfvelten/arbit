@@ -192,6 +192,48 @@ impl McpGateway {
             return (Some(err), rl, request_id);
         }
 
+        // ── Shadow mode ───────────────────────────────────────────────────────
+        // If the tool is in shadow_tools, return a mock response without forwarding.
+        if method == "tools/call" {
+            let tool_name = msg["params"]["name"].as_str().map(String::from);
+            let is_shadowed = {
+                let cfg = self.config.borrow();
+                cfg.agents
+                    .get(agent_id)
+                    .or(cfg.default_policy.as_ref())
+                    .is_some_and(|p| {
+                        tool_name
+                            .as_deref()
+                            .is_some_and(|t| p.shadow_tools.iter().any(|pat| tool_matches(pat, t)))
+                    })
+            };
+            if is_shadowed {
+                let id = msg["id"].clone();
+                tracing::info!(
+                    agent = agent_id,
+                    tool = tool_name.as_deref().unwrap_or("-"),
+                    "shadow mode: intercepted, not forwarded"
+                );
+                self.audit.record(Arc::new(AuditEntry {
+                    ts: SystemTime::now(),
+                    agent_id: agent_id.to_string(),
+                    method: method.clone(),
+                    tool: tool_name,
+                    outcome: Outcome::Shadowed,
+                    request_id: request_id.clone(),
+                }));
+                self.metrics.record(agent_id, "shadowed");
+                let mock = json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": {
+                        "content": [{"type": "text", "text": "[shadow] call intercepted — not forwarded to upstream"}]
+                    }
+                });
+                return (Some(mock), rl, request_id);
+            }
+        }
+
         // In Redact mode, scrub block_patterns from the request arguments before forwarding.
         // Injection patterns are always blocked upstream — if we reach here they didn't match.
         let msg = {
@@ -725,5 +767,80 @@ mod tests {
         let (out, changed) = redact_value(val.clone(), &[re]);
         assert!(!changed);
         assert_eq!(out, val);
+    }
+
+    // ── Shadow mode ───────────────────────────────────────────────────────────
+
+    fn make_gw_with_shadow(shadow_tools: Vec<String>) -> McpGateway {
+        let mut agents = HashMap::new();
+        agents.insert(
+            "agent".to_string(),
+            AgentPolicy {
+                allowed_tools: None,
+                denied_tools: vec![],
+                rate_limit: 100,
+                tool_rate_limits: HashMap::new(),
+                upstream: None,
+                api_key: None,
+                timeout_secs: None,
+                approval_required: vec![],
+                hitl_timeout_secs: 60,
+                shadow_tools,
+            },
+        );
+        make_gw(agents, vec![])
+    }
+
+    #[tokio::test]
+    async fn shadow_tool_returns_mock_response() {
+        let gw = make_gw_with_shadow(vec!["risky_write".to_string()]);
+        let msg = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {"name": "risky_write", "arguments": {"path": "/etc/passwd"}}
+        });
+        let (resp, _rl, _id) = gw.handle("agent", msg, None).await;
+        let resp = resp.expect("expected a response");
+        assert!(
+            resp["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("[shadow]")
+        );
+        assert!(resp.get("error").is_none());
+    }
+
+    #[tokio::test]
+    async fn non_shadow_tool_forwarded_normally() {
+        let gw = make_gw_with_shadow(vec!["risky_write".to_string()]);
+        let msg = json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {"name": "read_file", "arguments": {"path": "/tmp/ok"}}
+        });
+        // NoopUpstream returns None → response is None (forwarded, no mock)
+        let (resp, _rl, _id) = gw.handle("agent", msg, None).await;
+        assert!(resp.is_none());
+    }
+
+    #[tokio::test]
+    async fn shadow_glob_pattern_matches() {
+        let gw = make_gw_with_shadow(vec!["write_*".to_string()]);
+        let msg = json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {"name": "write_file", "arguments": {}}
+        });
+        let (resp, _rl, _id) = gw.handle("agent", msg, None).await;
+        let resp = resp.expect("expected mock response for write_file");
+        assert!(
+            resp["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("[shadow]")
+        );
     }
 }

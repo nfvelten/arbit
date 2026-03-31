@@ -29,6 +29,7 @@ impl WebhookAudit {
                     Outcome::Allowed => ("allowed", None),
                     Outcome::Blocked(r) => ("blocked", Some(r.as_str())),
                     Outcome::Forwarded => ("forwarded", None),
+                    Outcome::Shadowed => ("shadowed", None),
                 };
 
                 let body = json!({

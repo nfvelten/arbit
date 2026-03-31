@@ -22,6 +22,8 @@ pub enum Outcome {
     Allowed,
     Blocked(String),
     Forwarded,
+    /// Tool was intercepted and a mock response was returned — not forwarded to upstream.
+    Shadowed,
 }
 
 /// Pluggable audit log — swap SQLite, file, or external service

@@ -27,6 +27,12 @@ impl AuditLog for StdoutAudit {
                 agent = %entry.agent_id,
                 method = %entry.method,
             ),
+            Outcome::Shadowed => tracing::info!(
+                outcome = "shadowed",
+                agent = %entry.agent_id,
+                method = %entry.method,
+                tool,
+            ),
         }
     }
 }

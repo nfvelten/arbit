@@ -47,6 +47,7 @@ impl SqliteAudit {
                     Outcome::Allowed => ("allowed".to_string(), None),
                     Outcome::Blocked(r) => ("blocked".to_string(), Some(r.clone())),
                     Outcome::Forwarded => ("forwarded".to_string(), None),
+                    Outcome::Shadowed => ("shadowed".to_string(), None),
                 };
 
                 // Emit structured log for every persisted entry
@@ -68,6 +69,12 @@ impl SqliteAudit {
                         outcome = "forwarded",
                         agent = %entry.agent_id,
                         method = %entry.method,
+                    ),
+                    Outcome::Shadowed => tracing::info!(
+                        outcome = "shadowed",
+                        agent = %entry.agent_id,
+                        method = %entry.method,
+                        tool = entry.tool.as_deref().unwrap_or("-"),
                     ),
                 }
 
