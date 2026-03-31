@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.15.0] — 2026-03-31
+
+### Added
+- **Helm chart** (`charts/arbit/`): production-ready chart for Kubernetes deployment
+  - `Deployment` with non-root security context, liveness/readiness probes, config checksum annotation (auto-restart on config change)
+  - `ConfigMap` renders `gateway.yml` from `values.yaml`; supports `${VAR}` placeholders resolved from env vars
+  - `Service` (ClusterIP), `ServiceAccount` (automount disabled)
+  - Optional `HorizontalPodAutoscaler` (CPU/memory), `PodDisruptionBudget`, `NetworkPolicy` (restrict ingress to `arbit-client: "true"` pods), `PersistentVolumeClaim` for SQLite audit log
+  - Sidecar pattern: `extraContainers` in `values.yaml` adds agent containers to the same Pod (shared network — agent reaches arbit at `localhost:4000`)
+  - `existingSecret` mounts a Kubernetes Secret as env vars via `envFrom`
+  - `terminationGracePeriodSeconds: 30` aligned with SIGTERM graceful shutdown
+
+---
+
 ## [0.14.0] — 2026-03-31
 
 ### Added

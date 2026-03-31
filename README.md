@@ -35,6 +35,7 @@ Agent (Cursor, Claude, etc.)
 - **Circuit breaker** — upstream failures open the circuit; automatic half-open probe after recovery timeout
 - **Health check** — `GET /health` returns upstream status; `503` when any upstream is degraded
 - **Config hot-reload** — reload on `SIGUSR1` or automatically every 30 seconds without restart
+- **Helm chart** — production-ready chart at `charts/arbit/`; sidecar pattern via `extraContainers`; optional HPA, PDB, NetworkPolicy, PVC; `gateway.yml` rendered from `values.yaml`; secrets injected via `existingSecret` or `env`
 - **Container-ready** — multi-arch Docker image (`linux/amd64` + `linux/arm64`) published to `ghcr.io/nfvelten/arbit` on every release; runs as non-root (uid 10001); `LOG_FORMAT=json` structured logs; `docker-compose.yml` with healthcheck included
 - **Graceful shutdown** — SIGTERM and CTRL-C handled in both HTTP and stdio transports; active connections drained, child process closed, all audit backends flushed before exit — safe for Kubernetes `terminationGracePeriodSeconds`
 - **Secrets-safe config** — `${VAR}` interpolation in `gateway.yml` resolves env vars at startup; `ARBIT_ADMIN_TOKEN`, `ARBIT_UPSTREAM_URL`, `ARBIT_LISTEN_ADDR` override YAML values directly — compatible with Kubernetes Secrets, Vault Agent, External Secrets Operator, and any secret manager that injects env vars
@@ -447,6 +448,69 @@ Payload sent per `tools/call`:
 ```
 
 `eventType` is `COMPLETE` for allowed/forwarded/shadowed and `FAIL` for blocked. The `run.runId` matches the `X-Request-Id` header so lineage events can be correlated with audit log entries.
+
+## Helm
+
+```sh
+# Install with defaults (points upstream to $ARBIT_UPSTREAM_URL)
+helm install arbit ./charts/arbit \
+  --set env[0].name=ARBIT_UPSTREAM_URL \
+  --set env[0].value=http://mcp-server:3000/mcp
+
+# Install with an existing Kubernetes Secret
+helm install arbit ./charts/arbit --set existingSecret=arbit-secrets
+
+# Upgrade
+helm upgrade arbit ./charts/arbit -f my-values.yaml
+```
+
+```yaml
+# my-values.yaml — sidecar example
+config:
+  gateway: |
+    transport:
+      type: http
+      addr: "0.0.0.0:4000"
+      upstream: "${ARBIT_UPSTREAM_URL}"
+    agents:
+      my-agent:
+        allowed_tools: [read_file, list_dir]
+        rate_limit: 60
+    rules:
+      block_prompt_injection: true
+
+existingSecret: arbit-secrets   # must contain ARBIT_UPSTREAM_URL
+
+extraContainers:
+  - name: my-agent
+    image: my-org/my-agent:latest
+    env:
+      - name: MCP_GATEWAY_URL
+        value: http://localhost:4000/mcp
+```
+
+```
+┌─────────────────────────────────┐
+│  Pod                            │
+│  ┌──────────┐  ┌─────────────┐ │
+│  │  agent   │→ │    arbit    │ │
+│  │(sidecar) │  │  :4000/mcp  │ │
+│  └──────────┘  └──────┬──────┘ │
+└─────────────────────────│───────┘
+                          ↓
+                   MCP Server
+```
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `image.tag` | `""` (appVersion) | Override image tag |
+| `existingSecret` | `""` | K8s Secret loaded via `envFrom` |
+| `env` | `[]` | Extra env vars injected into arbit |
+| `autoscaling.enabled` | `false` | Enable HPA |
+| `podDisruptionBudget.enabled` | `false` | Enable PDB |
+| `networkPolicy.enabled` | `false` | Restrict ingress to `arbit-client: "true"` pods |
+| `persistence.enabled` | `false` | PVC for SQLite audit log |
+| `extraContainers` | `[]` | Sidecar containers sharing Pod network |
 
 ## Docker
 

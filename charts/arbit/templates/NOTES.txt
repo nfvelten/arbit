@@ -1,0 +1,18 @@
+arbit {{ .Chart.AppVersion }} has been deployed.
+
+Gateway endpoint (within the cluster):
+  http://{{ include "arbit.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.port }}/mcp
+
+Health check:
+  kubectl port-forward svc/{{ include "arbit.fullname" . }} {{ .Values.service.port }}:{{ .Values.service.port }} -n {{ .Release.Namespace }}
+  curl http://localhost:{{ .Values.service.port }}/health
+
+Metrics (Prometheus):
+  curl http://localhost:{{ .Values.service.port }}/metrics
+
+View logs:
+  kubectl logs -l app.kubernetes.io/name={{ include "arbit.name" . }} -n {{ .Release.Namespace }} -f
+
+Sidecar pattern — add arbit to your agent pod by copying the arbit container spec
+from this Deployment into your own pod template. The agent reaches arbit at:
+  http://localhost:{{ .Values.service.port }}/mcp
