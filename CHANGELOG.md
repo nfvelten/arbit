@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.9.0] — 2026-03-31
+
+### Added
+- **Tool Federation**: agents with `federate: true` query all named upstreams in parallel on `tools/list` and receive a single merged tool view; colliding tool names are prefixed with `<upstream>__name` (e.g. `filesystem__read_file`); `tools/call` transparently strips the prefix and routes to the correct upstream
+- **OpenAI Tools Bridge**: two new endpoints translate between OpenAI function-calling format and MCP, allowing legacy OpenAI SDK clients to use arbit's security infrastructure without refactoring:
+  - `GET /openai/v1/tools` — returns available tools in OpenAI function format (`parameters` / `type: function`)
+  - `POST /openai/v1/execute` — accepts `tool_calls` array, executes each via the MCP gateway, returns `tool_results`; all requests pass through the full middleware pipeline
+
+### Changed
+- `AgentPolicy` gains `federate: bool` field (default: `false`) — fully backward compatible
+
+---
+
 ## [0.8.0] — 2026-03-31
 
 ### Added

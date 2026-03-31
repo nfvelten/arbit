@@ -29,6 +29,8 @@ Agent (Cursor, Claude, etc.)
 - **Supply-chain security** — verify the MCP server binary before spawning it (stdio mode): SHA-256 hash pinning and/or `cosign verify-blob` (Sigstore transparency log); startup aborted on mismatch
 - **Audit log** — every request recorded with a unique `X-Request-Id`; fan-out to multiple backends simultaneously (SQLite, webhook, stdout)
 - **CloudEvents** — webhook audit backend can emit CNCF CloudEvents 1.0 envelopes (`application/cloudevents+json`), enabling direct ingestion by SIEMs (Splunk, Elastic, Datadog) without custom parsers
+- **Tool Federation** — agents with `federate: true` aggregate tools from all named upstreams into a single merged view; colliding names are prefixed with `<upstream>__`; `tools/call` is transparently routed to the correct upstream
+- **OpenAI Tools Bridge** — `GET /openai/v1/tools` and `POST /openai/v1/execute` let OpenAI function-calling clients use arbit without refactoring; all requests still pass through the full security pipeline
 - **Multiple upstreams** — route different agents to different MCP servers
 - **Circuit breaker** — upstream failures open the circuit; automatic half-open probe after recovery timeout
 - **Health check** — `GET /health` returns upstream status; `503` when any upstream is degraded
