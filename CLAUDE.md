@@ -133,7 +133,8 @@ These rules apply to every change made in this repository.
 
 1. **Issues first** — every new feature or bug fix must have a corresponding GitHub issue before work begins
 2. **Feature branch** — create a branch named `feat/<topic>` or `fix/<topic>` from `master`
-3. **Pull request to close** — all work lands via PR; the PR description must reference the issue (`Closes #N`)
+3. **Update docs** — update `README.md` and `CHANGELOG.md` for every feature or fix before committing
+4. **Pull request to close** — all work lands via PR; the PR description must reference the issue (`Closes #N`)
 
 ### Code quality checklist (required before every push)
 
