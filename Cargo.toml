@@ -35,7 +35,7 @@ async-trait = "0.1"
 anyhow = "1"
 rusqlite = { version = "0.31", features = ["bundled"] }
 uuid = { version = "1", features = ["v4"] }
-prometheus = "0.13"
+prometheus = "0.14"
 futures-util = "0.3"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
@@ -43,7 +43,7 @@ tracing-opentelemetry = "0.27"
 opentelemetry = { version = "0.26", features = ["trace"] }
 opentelemetry_sdk = { version = "0.26", features = ["rt-tokio"] }
 opentelemetry-otlp = { version = "0.26", features = ["trace", "grpc-tonic"] }
-jsonwebtoken = "9"
+jsonwebtoken = { version = "10", features = ["rust_crypto"] }
 subtle = "2"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 base64 = "0.22"
