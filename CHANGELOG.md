@@ -1,5 +1,19 @@
 # Changelog
 
+<<<<<<< fix/security-error-leakage
+## [Unreleased]
+
+### Fixed
+- **Blocked notifications no longer receive a JSON-RPC response** (`McpGateway`): JSON-RPC 2.0 §4 requires the server to remain silent when blocking a notification (request without `id`). Previously a `-32603` error was sent anyway, breaking strict-compliant MCP clients. The block decision is still recorded in the audit log. Closes #34.
+
+### Security
+- **Block errors no longer expose internal regex patterns** (`PayloadFilterMiddleware`): client-facing JSON-RPC error messages now return generic reasons (`"sensitive data detected"`, `"prompt injection detected"`) instead of the triggering pattern string. The matched pattern is still recorded in server logs (`tracing::debug!`) for operator visibility. Closes #30.
+- **Agent enumeration via error messages fixed** (`AuthMiddleware`): unknown agent IDs previously produced a distinct `"unknown agent '...'"` error that allowed attackers to enumerate valid agent names. The reason is now the uniform `"not authorized"` regardless of whether the agent exists. The agent identity is logged server-side only. Closes #31.
+
+---
+
+=======
+>>>>>>> master
 ## [0.16.0] — 2026-03-31
 
 ### Added
