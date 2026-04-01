@@ -104,6 +104,9 @@ pub struct HttpTransport {
     hitl_store: Arc<HitlStore>,
     /// OAuth manager — handles the `/oauth/callback` endpoint for upstream auth.
     oauth_manager: Arc<OAuthManager>,
+    /// Operator kill switch — tool names in this set are immediately blocked
+    /// regardless of agent policy. Managed via the dashboard UI.
+    kill_switch: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
 }
 
 impl HttpTransport {
@@ -131,6 +134,7 @@ impl HttpTransport {
             admin_token,
             hitl_store,
             oauth_manager,
+            kill_switch: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
         }
     }
 }
@@ -147,6 +151,7 @@ struct HttpState {
     admin_token: Option<String>,
     hitl_store: Arc<HitlStore>,
     oauth_manager: Arc<OAuthManager>,
+    kill_switch: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
 }
 
 const MAX_AGENT_ID_LEN: usize = 128;
@@ -164,6 +169,7 @@ impl Transport for HttpTransport {
             admin_token: self.admin_token.clone(),
             hitl_store: Arc::clone(&self.hitl_store),
             oauth_manager: Arc::clone(&self.oauth_manager),
+            kill_switch: Arc::clone(&self.kill_switch),
         });
 
         let app = Router::new()
@@ -173,6 +179,9 @@ impl Transport for HttpTransport {
             .route("/metrics", get(handle_metrics))
             .route("/health", get(handle_health))
             .route("/dashboard", get(handle_dashboard))
+            .route("/dashboard/tools/{tool}/block", post(handle_block_tool))
+            .route("/dashboard/tools/{tool}/block", delete(handle_unblock_tool))
+            .route("/dashboard/tools/{tool}/unblock", post(handle_unblock_tool))
             .route("/approvals", get(handle_list_approvals))
             .route("/approvals/{id}/approve", post(handle_approve))
             .route("/approvals/{id}/reject", post(handle_reject))
@@ -381,6 +390,29 @@ async fn handle_mcp(
 
     match resolve_agent(&state.sessions, &headers).await {
         Ok(agent_id) => {
+            // Kill switch: block tools/call for operator-disabled tools immediately,
+            // before the pipeline runs, regardless of agent policy.
+            if method == "tools/call"
+                && let Some(tool_name) = msg["params"]["name"].as_str()
+                && state.kill_switch.lock().unwrap().contains(tool_name)
+            {
+                tracing::warn!(
+                    agent = %agent_id,
+                    tool = tool_name,
+                    "kill switch: tool blocked by operator"
+                );
+                let id = msg.get("id").cloned();
+                return Json(serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "error": {
+                        "code": -32603,
+                        "message": format!("tool '{}' is blocked by operator", tool_name)
+                    }
+                }))
+                .into_response();
+            }
+
             let (response, rl, request_id) = state.gateway.handle(&agent_id, msg, client_ip).await;
             match response {
                 Some(body) => {
@@ -472,8 +504,22 @@ async fn handle_metrics(
 
 // ── Dashboard ─────────────────────────────────────────────────────────────────
 
+// ── Dashboard query params ────────────────────────────────────────────────────
+
+#[derive(serde::Deserialize, Default)]
+struct DashboardParams {
+    agent: Option<String>,
+    outcome: Option<String>,
+    tool: Option<String>,
+    /// Duration string, e.g. "1h", "30m", "7d"
+    since: Option<String>,
+    #[serde(default)]
+    page: usize,
+}
+
 async fn handle_dashboard(
     State(state): State<Arc<HttpState>>,
+    Query(params): Query<DashboardParams>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
     use axum::http::header::CONTENT_TYPE;
@@ -491,16 +537,86 @@ async fn handle_dashboard(
             .into_response();
     };
 
+    const PAGE_SIZE: usize = 100;
+    let offset = params.page * PAGE_SIZE;
+
+    // Collect current kill-switch state before blocking task
+    let killed_tools: Vec<String> = {
+        let ks = state.kill_switch.lock().unwrap();
+        let mut v: Vec<String> = ks.iter().cloned().collect();
+        v.sort();
+        v
+    };
+
     let db_path = db_path.clone();
+    let filter_agent = params.agent.clone();
+    let filter_outcome = params.outcome.clone();
+    let filter_tool = params.tool.clone();
+    let filter_since = params.since.clone();
+
     type AuditRow = (i64, String, String, Option<String>, String, Option<String>);
-    let rows: Vec<AuditRow> = tokio::time::timeout(
+    type Stats = (i64, i64, i64, i64); // total, allowed, blocked, forwarded
+
+    let result: Option<(Vec<AuditRow>, Stats, i64)> = tokio::time::timeout(
         std::time::Duration::from_secs(5),
-        tokio::task::spawn_blocking(move || {
+        tokio::task::spawn_blocking(move || -> anyhow::Result<(Vec<AuditRow>, Stats, i64)> {
             let conn = rusqlite::Connection::open(&db_path)?;
-            let mut stmt = conn.prepare(
-                "SELECT ts, agent_id, method, tool, outcome, reason \
-                     FROM audit_log ORDER BY id DESC LIMIT 200",
+
+            // Build WHERE clause from filters
+            let now_ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64;
+
+            let mut conditions: Vec<String> = Vec::new();
+            if let Some(ref a) = filter_agent {
+                conditions.push(format!("agent_id = '{}'", a.replace('\'', "''")));
+            }
+            if let Some(ref o) = filter_outcome {
+                conditions.push(format!("outcome = '{}'", o.replace('\'', "''")));
+            }
+            if let Some(ref t) = filter_tool {
+                conditions.push(format!("tool = '{}'", t.replace('\'', "''")));
+            }
+            if let Some(ref s) = filter_since
+                && let Some(secs) = parse_since(s)
+            {
+                conditions.push(format!("ts >= {}", now_ts - secs));
+            }
+
+            let where_sql = if conditions.is_empty() {
+                String::new()
+            } else {
+                format!("WHERE {}", conditions.join(" AND "))
+            };
+
+            // Summary stats (unfiltered by outcome for the breakdown)
+            let stats: Stats = conn.query_row(
+                &format!(
+                    "SELECT COUNT(*), \
+                     SUM(CASE WHEN outcome='allowed' THEN 1 ELSE 0 END), \
+                     SUM(CASE WHEN outcome='blocked' THEN 1 ELSE 0 END), \
+                     SUM(CASE WHEN outcome='forwarded' THEN 1 ELSE 0 END) \
+                     FROM audit_log {where_sql}"
+                ),
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )?;
+
+            // Total matching rows (for pagination)
+            let total_filtered: i64 = conn.query_row(
+                &format!("SELECT COUNT(*) FROM audit_log {where_sql}"),
+                [],
+                |r| r.get(0),
+            )?;
+
+            // Paginated rows
+            let sql = format!(
+                "SELECT ts, agent_id, method, tool, outcome, reason \
+                 FROM audit_log {where_sql} \
+                 ORDER BY id DESC LIMIT {PAGE_SIZE} OFFSET {offset}"
+            );
+            let mut stmt = conn.prepare(&sql)?;
             let rows = stmt
                 .query_map([], |row| {
                     Ok((
@@ -514,72 +630,303 @@ async fn handle_dashboard(
                 })?
                 .filter_map(|r| r.ok())
                 .collect();
-            anyhow::Ok(rows)
+
+            Ok((rows, stats, total_filtered))
         }),
     )
     .await
     .ok()
     .and_then(|r| r.ok())
-    .and_then(|r| r.ok())
-    .unwrap_or_default();
+    .and_then(|r| r.ok());
 
+    let (rows, stats, total_filtered) = result.unwrap_or_default();
+    let (total_all, allowed, blocked, _forwarded) = stats;
+    let block_pct = if total_all > 0 {
+        blocked * 100 / total_all
+    } else {
+        0
+    };
+
+    // Build query string helper (for filter-preserving links)
+    let qs_base = {
+        let mut parts = Vec::new();
+        if let Some(ref a) = params.agent {
+            parts.push(format!("agent={}", urlenc(a)));
+        }
+        if let Some(ref o) = params.outcome {
+            parts.push(format!("outcome={}", urlenc(o)));
+        }
+        if let Some(ref t) = params.tool {
+            parts.push(format!("tool={}", urlenc(t)));
+        }
+        if let Some(ref s) = params.since {
+            parts.push(format!("since={}", urlenc(s)));
+        }
+        parts.join("&")
+    };
+    let page_link = |p: usize| {
+        if qs_base.is_empty() {
+            format!("?page={p}")
+        } else {
+            format!("?{qs_base}&page={p}")
+        }
+    };
+
+    // Audit table rows
     let mut table_rows = String::new();
     for (ts, agent, method, tool, outcome, reason) in &rows {
         let dt = chrono_ts(*ts);
         let badge = match outcome.as_str() {
-            "allowed" => r#"<span class="badge allowed">allowed</span>"#,
-            "blocked" => r#"<span class="badge blocked">blocked</span>"#,
-            _ => r#"<span class="badge forwarded">forwarded</span>"#,
+            "allowed" => r#"<span class="badge badge-allowed">allowed</span>"#,
+            "blocked" => r#"<span class="badge badge-blocked">blocked</span>"#,
+            "forwarded" => r#"<span class="badge badge-forwarded">forwarded</span>"#,
+            _ => r#"<span class="badge badge-shadowed">shadowed</span>"#,
         };
         let tool_str = html_escape(tool.as_deref().unwrap_or("—"));
         let reason_str = html_escape(reason.as_deref().unwrap_or(""));
         table_rows.push_str(&format!(
-            "<tr><td>{dt}</td><td>{}</td><td>{}</td><td>{tool_str}</td><td>{badge}</td><td>{reason_str}</td></tr>\n",
+            "<tr><td class=\"mono\">{dt}</td><td>{}</td><td>{}</td>\
+             <td>{tool_str}</td><td>{badge}</td><td class=\"reason\">{reason_str}</td></tr>\n",
             html_escape(agent),
             html_escape(method),
         ));
     }
 
-    let total = rows.len();
+    // Kill switch panel rows
+    let mut ks_rows = String::new();
+    for tool in &killed_tools {
+        let t = html_escape(tool);
+        ks_rows.push_str(&format!(
+            "<tr><td>{t}</td><td>\
+             <form method=\"post\" action=\"/dashboard/tools/{t}/unblock\" style=\"margin:0\">\
+             <button class=\"btn btn-unblock\" type=\"submit\">Unblock</button></form>\
+             </td></tr>\n"
+        ));
+    }
+    let ks_empty = if killed_tools.is_empty() {
+        "<p class=\"ks-empty\">No tools currently blocked.</p>"
+    } else {
+        ""
+    };
+
+    // Pagination
+    let total_pages = (total_filtered as usize).div_ceil(PAGE_SIZE);
+    let mut pagination = String::new();
+    if total_pages > 1 {
+        if params.page > 0 {
+            pagination.push_str(&format!(
+                "<a class=\"page-btn\" href=\"{}\">← Prev</a>",
+                page_link(params.page - 1)
+            ));
+        }
+        pagination.push_str(&format!(
+            "<span class=\"page-info\">Page {} of {}</span>",
+            params.page + 1,
+            total_pages
+        ));
+        if params.page + 1 < total_pages {
+            pagination.push_str(&format!(
+                "<a class=\"page-btn\" href=\"{}\">Next →</a>",
+                page_link(params.page + 1)
+            ));
+        }
+    }
+
+    // Current filter values for form pre-fill
+    let fv_agent = html_escape(params.agent.as_deref().unwrap_or(""));
+    let fv_outcome = params.outcome.as_deref().unwrap_or("");
+    let fv_tool = html_escape(params.tool.as_deref().unwrap_or(""));
+    let fv_since = html_escape(params.since.as_deref().unwrap_or(""));
+    let sel = |v: &str, cmp: &str| if v == cmp { " selected" } else { "" };
+
+    // Auto-refresh URL (preserves filters, resets to page 0)
+    let refresh_url = if qs_base.is_empty() {
+        "/dashboard".to_string()
+    } else {
+        format!("/dashboard?{qs_base}")
+    };
+
     let html = format!(
         r#"<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>arbit — audit dashboard</title>
+<title>arbit — dashboard</title>
 <style>
-  body {{ font-family: system-ui, sans-serif; margin: 0; background: #f5f5f5; color: #222; }}
-  header {{ background: #1a1a2e; color: #fff; padding: 1rem 2rem; display: flex; align-items: center; gap: 1rem; }}
-  header h1 {{ margin: 0; font-size: 1.2rem; font-weight: 600; }}
-  header span {{ font-size: .85rem; opacity: .7; }}
-  main {{ padding: 1.5rem 2rem; }}
-  table {{ width: 100%; border-collapse: collapse; background: #fff; border-radius: 8px; overflow: hidden; box-shadow: 0 1px 4px rgba(0,0,0,.1); }}
-  th {{ background: #eee; text-align: left; padding: .6rem 1rem; font-size: .8rem; text-transform: uppercase; letter-spacing: .05em; }}
-  td {{ padding: .55rem 1rem; border-top: 1px solid #eee; font-size: .88rem; }}
-  tr:hover td {{ background: #fafafa; }}
-  .badge {{ display: inline-block; padding: .15rem .5rem; border-radius: 4px; font-size: .75rem; font-weight: 600; }}
-  .allowed {{ background: #d4edda; color: #155724; }}
-  .blocked {{ background: #f8d7da; color: #721c24; }}
-  .forwarded {{ background: #cce5ff; color: #004085; }}
-  .meta {{ margin-bottom: 1rem; font-size: .85rem; color: #666; }}
+*{{box-sizing:border-box}}
+body{{font-family:system-ui,sans-serif;margin:0;background:#f0f2f5;color:#1a1a2e}}
+header{{background:#1a1a2e;color:#fff;padding:.9rem 2rem;display:flex;align-items:center;gap:1.5rem}}
+header h1{{margin:0;font-size:1.1rem;font-weight:700;letter-spacing:.02em}}
+header .sub{{font-size:.8rem;opacity:.6}}
+.refresh-btn{{margin-left:auto;background:rgba(255,255,255,.15);border:none;color:#fff;
+  padding:.35rem .8rem;border-radius:5px;cursor:pointer;font-size:.8rem}}
+.refresh-btn:hover{{background:rgba(255,255,255,.25)}}
+main{{padding:1.5rem 2rem;max-width:1400px}}
+.stats{{display:grid;grid-template-columns:repeat(4,1fr);gap:1rem;margin-bottom:1.5rem}}
+.stat-card{{background:#fff;border-radius:8px;padding:1rem 1.2rem;
+  box-shadow:0 1px 3px rgba(0,0,0,.08)}}
+.stat-card .label{{font-size:.75rem;text-transform:uppercase;letter-spacing:.05em;
+  color:#666;margin-bottom:.3rem}}
+.stat-card .value{{font-size:1.6rem;font-weight:700}}
+.stat-card.danger .value{{color:#c0392b}}
+.stat-card.success .value{{color:#27ae60}}
+.panel{{background:#fff;border-radius:8px;padding:1.2rem 1.4rem;
+  box-shadow:0 1px 3px rgba(0,0,0,.08);margin-bottom:1.5rem}}
+.panel h2{{margin:0 0 .9rem;font-size:.95rem;font-weight:600}}
+.ks-form{{display:flex;gap:.6rem;margin-bottom:.8rem}}
+.ks-form input{{flex:1;padding:.4rem .7rem;border:1px solid #ddd;border-radius:5px;font-size:.88rem}}
+.filter-form{{display:flex;flex-wrap:wrap;gap:.6rem;align-items:flex-end}}
+.filter-form label{{display:flex;flex-direction:column;gap:.25rem;font-size:.78rem;
+  text-transform:uppercase;letter-spacing:.04em;color:#555}}
+.filter-form input,.filter-form select{{padding:.4rem .7rem;border:1px solid #ddd;
+  border-radius:5px;font-size:.88rem;min-width:130px}}
+table{{width:100%;border-collapse:collapse;font-size:.87rem}}
+thead th{{background:#f7f7f7;padding:.55rem .9rem;text-align:left;
+  font-size:.75rem;text-transform:uppercase;letter-spacing:.04em;color:#555;
+  border-bottom:2px solid #eee}}
+td{{padding:.5rem .9rem;border-top:1px solid #f0f0f0}}
+tr:hover td{{background:#fafafa}}
+.mono{{font-family:monospace;font-size:.82rem;color:#555}}
+.reason{{color:#888;font-size:.82rem;max-width:200px;overflow:hidden;
+  text-overflow:ellipsis;white-space:nowrap}}
+.badge{{display:inline-block;padding:.15rem .55rem;border-radius:4px;
+  font-size:.73rem;font-weight:600}}
+.badge-allowed{{background:#d5f5e3;color:#1e8449}}
+.badge-blocked{{background:#fadbd8;color:#c0392b}}
+.badge-forwarded{{background:#d6eaf8;color:#1a5276}}
+.badge-shadowed{{background:#fdebd0;color:#784212}}
+.btn{{padding:.3rem .7rem;border:none;border-radius:4px;cursor:pointer;font-size:.82rem;font-weight:500}}
+.btn-block{{background:#c0392b;color:#fff}}
+.btn-block:hover{{background:#a93226}}
+.btn-unblock{{background:#e8f8f5;color:#1e8449;border:1px solid #a9dfbf}}
+.btn-unblock:hover{{background:#d5f5e3}}
+.btn-apply{{background:#1a1a2e;color:#fff}}
+.btn-apply:hover{{background:#2c2c54}}
+.btn-clear{{background:#f4f4f4;color:#555;border:1px solid #ddd}}
+.pagination{{display:flex;align-items:center;gap:.7rem;margin-top:1rem;font-size:.85rem}}
+.page-btn{{background:#fff;border:1px solid #ddd;padding:.3rem .7rem;
+  border-radius:4px;text-decoration:none;color:#333}}
+.page-btn:hover{{background:#f4f4f4}}
+.page-info{{color:#666}}
+.ks-empty{{color:#888;font-size:.85rem;margin:.3rem 0}}
+.ks-table td{{padding:.35rem .7rem}}
+.section-row{{display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin-bottom:1.5rem}}
 </style>
 </head>
 <body>
 <header>
   <h1>arbit</h1>
-  <span>audit dashboard — last {total} entries</span>
+  <span class="sub">audit dashboard</span>
+  <button class="refresh-btn" onclick="location.href='{refresh_url}'">↻ Refresh</button>
 </header>
 <main>
-<p class="meta">Showing the most recent {total} audit entries (newest first). Refresh the page for live data.</p>
-<table>
-<thead><tr><th>Time</th><th>Agent</th><th>Method</th><th>Tool</th><th>Outcome</th><th>Reason</th></tr></thead>
-<tbody>
-{table_rows}</tbody>
-</table>
+
+<div class="stats">
+  <div class="stat-card">
+    <div class="label">Total (filtered)</div>
+    <div class="value">{total_filtered}</div>
+  </div>
+  <div class="stat-card success">
+    <div class="label">Allowed</div>
+    <div class="value">{allowed}</div>
+  </div>
+  <div class="stat-card danger">
+    <div class="label">Blocked</div>
+    <div class="value">{blocked}</div>
+  </div>
+  <div class="stat-card">
+    <div class="label">Block rate</div>
+    <div class="value">{block_pct}%</div>
+  </div>
+</div>
+
+<div class="section-row">
+<div class="panel">
+  <h2>Kill Switch</h2>
+  <form class="ks-form" method="post" id="ks-add">
+    <input name="tool" placeholder="tool name (e.g. write_file)" required>
+    <button class="btn btn-block" type="submit" id="ks-submit">Block Tool</button>
+  </form>
+  <script>
+    document.getElementById('ks-add').addEventListener('submit', function(e) {{
+      e.preventDefault();
+      var tool = this.tool.value.trim();
+      if (!tool) return;
+      fetch('/dashboard/tools/' + encodeURIComponent(tool) + '/block', {{method:'POST'}})
+        .then(function() {{ location.reload(); }});
+    }});
+  </script>
+  {ks_empty}
+  {ks_table}
+</div>
+
+<div class="panel">
+  <h2>Filters</h2>
+  <form class="filter-form" method="get" action="/dashboard">
+    <label>Agent
+      <input name="agent" value="{fv_agent}" placeholder="any">
+    </label>
+    <label>Outcome
+      <select name="outcome">
+        <option value=""{out_any}>any</option>
+        <option value="allowed"{out_allowed}>allowed</option>
+        <option value="blocked"{out_blocked}>blocked</option>
+        <option value="forwarded"{out_forwarded}>forwarded</option>
+      </select>
+    </label>
+    <label>Tool
+      <input name="tool" value="{fv_tool}" placeholder="any">
+    </label>
+    <label>Since
+      <input name="since" value="{fv_since}" placeholder="e.g. 1h 30m 7d">
+    </label>
+    <div style="display:flex;gap:.4rem;align-self:flex-end">
+      <button class="btn btn-apply" type="submit">Apply</button>
+      <a class="btn btn-clear" href="/dashboard">Clear</a>
+    </div>
+  </form>
+</div>
+</div>
+
+<div class="panel">
+  <h2>Audit Log <span style="font-weight:400;color:#888;font-size:.85rem">— {total_filtered} entries, showing page {page_num}</span></h2>
+  <table>
+    <thead><tr>
+      <th>Time</th><th>Agent</th><th>Method</th>
+      <th>Tool</th><th>Outcome</th><th>Reason</th>
+    </tr></thead>
+    <tbody>{table_rows}</tbody>
+  </table>
+  <div class="pagination">{pagination}</div>
+</div>
+
 </main>
 </body>
-</html>"#
+</html>"#,
+        refresh_url = refresh_url,
+        total_filtered = total_filtered,
+        allowed = allowed,
+        blocked = blocked,
+        block_pct = block_pct,
+        ks_empty = ks_empty,
+        ks_table = if !killed_tools.is_empty() {
+            format!(
+                "<table class=\"ks-table\"><thead><tr><th>Tool</th><th></th></tr></thead><tbody>{ks_rows}</tbody></table>"
+            )
+        } else {
+            String::new()
+        },
+        fv_agent = fv_agent,
+        out_any = sel(fv_outcome, ""),
+        out_allowed = sel(fv_outcome, "allowed"),
+        out_blocked = sel(fv_outcome, "blocked"),
+        out_forwarded = sel(fv_outcome, "forwarded"),
+        fv_tool = fv_tool,
+        fv_since = fv_since,
+        table_rows = table_rows,
+        page_num = params.page + 1,
+        pagination = pagination,
     );
 
     (
@@ -588,6 +935,57 @@ async fn handle_dashboard(
         html,
     )
         .into_response()
+}
+
+// ── Kill switch handlers ──────────────────────────────────────────────────────
+
+async fn handle_block_tool(
+    State(state): State<Arc<HttpState>>,
+    headers: HeaderMap,
+    axum::extract::Path(tool): axum::extract::Path<String>,
+) -> impl IntoResponse {
+    if !check_admin_auth(&state, &headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    state.kill_switch.lock().unwrap().insert(tool.clone());
+    tracing::warn!(tool = %tool, "operator kill switch: tool blocked");
+    StatusCode::NO_CONTENT.into_response()
+}
+
+async fn handle_unblock_tool(
+    State(state): State<Arc<HttpState>>,
+    headers: HeaderMap,
+    axum::extract::Path(tool): axum::extract::Path<String>,
+) -> impl IntoResponse {
+    if !check_admin_auth(&state, &headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    state.kill_switch.lock().unwrap().remove(&tool);
+    tracing::info!(tool = %tool, "operator kill switch: tool unblocked");
+    // Redirect back to dashboard after form POST
+    axum::response::Redirect::to("/dashboard").into_response()
+}
+
+// ── Dashboard helpers ─────────────────────────────────────────────────────────
+
+/// Parse duration strings like "30m", "2h", "7d" into seconds.
+fn parse_since(s: &str) -> Option<i64> {
+    let s = s.trim();
+    if let Some(n) = s.strip_suffix('d') {
+        n.parse::<i64>().ok().map(|v| v * 86400)
+    } else if let Some(n) = s.strip_suffix('h') {
+        n.parse::<i64>().ok().map(|v| v * 3600)
+    } else if let Some(n) = s.strip_suffix('m') {
+        n.parse::<i64>().ok().map(|v| v * 60)
+    } else if let Some(n) = s.strip_suffix('s') {
+        n.parse::<i64>().ok()
+    } else {
+        s.parse::<i64>().ok()
+    }
+}
+
+fn urlenc(s: &str) -> String {
+    percent_encoding::utf8_percent_encode(s, percent_encoding::NON_ALPHANUMERIC).to_string()
 }
 
 // ── HITL approval endpoints ───────────────────────────────────────────────────
