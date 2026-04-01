@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Added
+- **Observability Dashboard enhancements** (`transport/http.rs`): rebuilt `/dashboard` with filter bar (agent, outcome, tool, since), summary stats cards (total, allowed, blocked, block rate %), paginated audit table (100 entries/page), and operator **kill switch** — block/unblock individual tools from the UI without restarting the gateway. Blocked tools return a JSON-RPC error immediately, before the middleware pipeline. Closes #4.
 - **Immutable audit log — hash chain integrity** (`audit/sqlite.rs`): every new entry stores a `prev_hash` and an `entry_hash` (SHA-256 of the previous hash + all fields). Existing databases are migrated transparently; legacy rows are skipped during verification. New `arbit verify-log <db>` subcommand walks the chain and exits non-zero if any row is missing, tampered, or chain-broken. Closes #10.
 
 ### Added
