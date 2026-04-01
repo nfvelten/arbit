@@ -1,0 +1,28 @@
+apiVersion: v1
+entries:
+  arbit:
+  - apiVersion: v2
+    appVersion: 0.14.0
+    created: "2026-04-01T13:05:25.688758287Z"
+    description: Security proxy for MCP servers — auth, rate limiting, payload filtering,
+      and audit logging between AI agents and MCP servers.
+    digest: 80c8695f63a184f6f5aada3782150683255e24c9dd5cfb91b88553199b495938
+    home: https://github.com/nfvelten/arbit
+    keywords:
+    - mcp
+    - ai
+    - security
+    - proxy
+    - gateway
+    - audit
+    maintainers:
+    - name: nfvelten
+      url: https://github.com/nfvelten
+    name: arbit
+    sources:
+    - https://github.com/nfvelten/arbit
+    type: application
+    urls:
+    - https://github.com/nfvelten/arbit/releases/download/arbit-0.1.0/arbit-0.1.0.tgz
+    version: 0.1.0
+generated: "2026-04-01T13:05:25.688764679Z"
