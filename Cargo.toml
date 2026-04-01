@@ -53,6 +53,7 @@ jsonschema = { version = "0.18", default-features = false }
 sha2 = "0.10"
 hex = "0.4"
 which = "7"
+lru = "0.16.3"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }

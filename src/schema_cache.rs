@@ -1,20 +1,35 @@
-/// Per-agent tool schema cache.
+/// Per-agent tool schema cache with LRU eviction.
 ///
 /// Populated when a `tools/list` response passes through the gateway.
 /// Read by `SchemaValidationMiddleware` to validate `tools/call` arguments
 /// against the `inputSchema` advertised by the upstream server.
+///
+/// Bounded to [`SCHEMA_CACHE_CAPACITY`] entries to prevent unbounded memory
+/// growth in deployments with many agents or frequently-changing tool sets.
+use lru::LruCache;
 use serde_json::Value;
 use std::{
-    collections::HashMap,
-    sync::{Arc, RwLock},
+    num::NonZeroUsize,
+    sync::{Arc, Mutex},
 };
 
-#[derive(Clone, Default)]
-pub struct SchemaCache(Arc<RwLock<HashMap<(String, String), Value>>>);
+/// Maximum number of `(agent_id, tool_name)` entries held in memory.
+/// LRU eviction removes the least-recently-used entry when this is exceeded.
+const SCHEMA_CACHE_CAPACITY: usize = 1024;
+
+#[derive(Clone)]
+pub struct SchemaCache(Arc<Mutex<LruCache<(String, String), Value>>>);
+
+impl Default for SchemaCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl SchemaCache {
     pub fn new() -> Self {
-        Self::default()
+        let cap = NonZeroUsize::new(SCHEMA_CACHE_CAPACITY).expect("capacity is non-zero");
+        Self(Arc::new(Mutex::new(LruCache::new(cap))))
     }
 
     /// Populate the cache from a `tools/list` response (already filtered by agent policy).
@@ -23,13 +38,13 @@ impl SchemaCache {
         let Some(tools) = response.pointer("/result/tools").and_then(|t| t.as_array()) else {
             return;
         };
-        let mut map = self.0.write().expect("schema cache lock poisoned");
+        let mut map = self.0.lock().expect("schema cache lock poisoned");
         for tool in tools {
             let Some(name) = tool["name"].as_str() else {
                 continue;
             };
             if let Some(schema) = tool.get("inputSchema") {
-                map.insert((agent_id.to_string(), name.to_string()), schema.clone());
+                map.put((agent_id.to_string(), name.to_string()), schema.clone());
             }
         }
     }
@@ -37,7 +52,7 @@ impl SchemaCache {
     /// Look up the cached input schema for a tool. Returns `None` if not yet cached.
     pub fn get(&self, agent_id: &str, tool_name: &str) -> Option<Value> {
         self.0
-            .read()
+            .lock()
             .expect("schema cache lock poisoned")
             .get(&(agent_id.to_string(), tool_name.to_string()))
             .cloned()
@@ -115,7 +130,6 @@ mod tests {
     #[test]
     fn populate_skips_tool_without_name() {
         let cache = SchemaCache::new();
-        // Tool entry missing "name" field — should not panic or insert garbage
         let resp = json!({
             "result": {
                 "tools": [
@@ -131,7 +145,6 @@ mod tests {
     #[test]
     fn populate_handles_missing_result_key() {
         let cache = SchemaCache::new();
-        // Malformed response — should not panic
         cache.populate("agent", &json!({}));
         cache.populate("agent", &json!({"result": {}}));
         cache.populate("agent", &json!({"result": {"tools": null}}));
@@ -143,5 +156,33 @@ mod tests {
         let cache = SchemaCache::new();
         cache.populate("agent", &json!({"result": {"tools": "not-an-array"}}));
         assert!(cache.get("agent", "anything").is_none());
+    }
+
+    #[test]
+    fn lru_evicts_oldest_entry_when_capacity_exceeded() {
+        // Build a cache with capacity 2 to exercise eviction without inserting 1024 entries.
+        let cap = NonZeroUsize::new(2).unwrap();
+        let cache = SchemaCache(Arc::new(Mutex::new(LruCache::new(cap))));
+
+        let schema = json!({"type": "object"});
+        cache.populate("a", &tools_list(&[("t1", Some(schema.clone()))]));
+        cache.populate("a", &tools_list(&[("t2", Some(schema.clone()))]));
+        // Access t1 so it becomes the most-recently-used entry
+        assert!(cache.get("a", "t1").is_some());
+        // Inserting t3 should evict t2 (least-recently-used)
+        cache.populate("a", &tools_list(&[("t3", Some(schema.clone()))]));
+
+        assert!(
+            cache.get("a", "t1").is_some(),
+            "t1 was recently used — must survive"
+        );
+        assert!(
+            cache.get("a", "t3").is_some(),
+            "t3 was just inserted — must be present"
+        );
+        assert!(
+            cache.get("a", "t2").is_none(),
+            "t2 was least-recently-used — must be evicted"
+        );
     }
 }
