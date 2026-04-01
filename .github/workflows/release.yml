@@ -25,7 +25,7 @@ jobs:
             target: aarch64-unknown-linux-musl
             archive: tar.gz
             use_cross: true
-          - os: macos-13
+          - os: macos-latest
             target: x86_64-apple-darwin
             archive: tar.gz
           - os: macos-latest
