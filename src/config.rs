@@ -244,25 +244,45 @@ fn default_hitl_timeout() -> u64 {
     60
 }
 
-/// Match a tool name against a pattern that may contain `*` as a wildcard.
-/// `*` matches zero or more characters. Multiple wildcards are supported.
+/// Match a tool name against a glob pattern that supports `*` as a wildcard.
 ///
-/// Examples:
 /// - `"read_file"` matches only `"read_file"` (exact)
 /// - `"read_*"` matches `"read_file"`, `"read_dir"`, etc.
 /// - `"*"` matches any tool name
+///
+/// Implemented via a segment-anchoring scan — O(n · m) — to avoid the
+/// exponential blow-up of recursive backtracking with multiple `*`.
 pub(crate) fn tool_matches(pattern: &str, tool: &str) -> bool {
     if !pattern.contains('*') {
         return pattern == tool;
     }
-    fn r#match(p: &[u8], t: &[u8]) -> bool {
-        match p.first() {
-            None => t.is_empty(),
-            Some(b'*') => (0..=t.len()).any(|i| r#match(&p[1..], &t[i..])),
-            Some(&c) => !t.is_empty() && t[0] == c && r#match(&p[1..], &t[1..]),
+
+    let mut segments = pattern.split('*');
+
+    // The first segment must be an exact prefix of `tool`.
+    let prefix = segments.next().unwrap_or("");
+    if !tool.starts_with(prefix) {
+        return false;
+    }
+    let mut rest = &tool[prefix.len()..];
+
+    // Each subsequent segment (except the last) must appear in order.
+    let mut segs: Vec<&str> = segments.collect();
+    // The last segment is a required suffix.
+    let suffix = segs.pop().unwrap_or("");
+
+    for seg in segs {
+        if seg.is_empty() {
+            continue; // consecutive `**` — skip
+        }
+        match rest.find(seg) {
+            Some(pos) => rest = &rest[pos + seg.len()..],
+            None => return false,
         }
     }
-    r#match(pattern.as_bytes(), tool.as_bytes())
+
+    // The remaining string must end with the required suffix.
+    rest.ends_with(suffix)
 }
 
 // ── JWT / OIDC ────────────────────────────────────────────────────────────────
@@ -769,6 +789,25 @@ mod tests {
     fn middle_wildcard() {
         assert!(tool_matches("read_*_v2", "read_file_v2"));
         assert!(!tool_matches("read_*_v2", "read_file_v3"));
+    }
+
+    #[test]
+    fn multiple_wildcards() {
+        assert!(tool_matches("*read*file*", "read_file"));
+        assert!(tool_matches("*read*file*", "xread_filex"));
+        assert!(!tool_matches("*read*file*", "read_only"));
+    }
+
+    #[test]
+    fn glob_dos_completes_instantly() {
+        // A crafted pattern with many consecutive `*` that previously caused
+        // exponential backtracking. Must complete in well under 1 s.
+        let pattern = "*a*a*a*a*a*a*a*a*a*a*";
+        let tool = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"; // no 'a' — must not match
+        assert!(!tool_matches(pattern, tool));
+
+        let long_tool: String = "a".repeat(64);
+        assert!(tool_matches(pattern, &long_tool)); // all 'a's — must match
     }
 
     #[test]
