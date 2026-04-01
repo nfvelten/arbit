@@ -223,10 +223,15 @@ async fn cmd_start(config_path: String) -> anyhow::Result<()> {
     ));
     let (config_tx, config_rx) = watch::channel(live);
 
+    // Metrics is created here (before hot-reload) so the reload task can
+    // increment config_reload_failures_total on parse/IO errors.
+    let metrics = Arc::new(GatewayMetrics::new()?);
+
     // ── Hot-reload ────────────────────────────────────────────────────────────
     {
         let reload_path = config_path.clone();
         let tx = config_tx;
+        let reload_metrics = Arc::clone(&metrics);
         tokio::spawn(async move {
             #[cfg(unix)]
             let mut sigusr1 = {
@@ -255,7 +260,7 @@ async fn cmd_start(config_path: String) -> anyhow::Result<()> {
                     };
                     if matches!(trigger, Trigger::Signal) {
                         tracing::info!("SIGUSR1 received, reloading config");
-                        do_reload(&reload_path, &tx, &mut last_error);
+                        do_reload(&reload_path, &tx, &reload_metrics, &mut last_error);
                         last_modified = tokio::fs::metadata(&reload_path)
                             .await
                             .ok()
@@ -272,7 +277,7 @@ async fn cmd_start(config_path: String) -> anyhow::Result<()> {
                     .and_then(|m| m.modified().ok());
                 if modified.is_some() && modified != last_modified {
                     last_modified = modified;
-                    do_reload(&reload_path, &tx, &mut last_error);
+                    do_reload(&reload_path, &tx, &reload_metrics, &mut last_error);
                 }
             }
         });
@@ -302,8 +307,6 @@ async fn cmd_start(config_path: String) -> anyhow::Result<()> {
             (name.clone(), upstream)
         })
         .collect();
-
-    let metrics = Arc::new(GatewayMetrics::new()?);
 
     let jwt = config.auth.map(|auth_cfg| {
         let configs = auth_cfg.into_configs().expect("invalid auth config");
@@ -795,6 +798,7 @@ fn build_audit_backend(cfg: &AuditConfig) -> anyhow::Result<Arc<dyn AuditLog>> {
 fn do_reload(
     reload_path: &str,
     tx: &tokio::sync::watch::Sender<Arc<LiveConfig>>,
+    metrics: &GatewayMetrics,
     last_error: &mut Option<std::time::Instant>,
 ) {
     match Config::from_file(reload_path) {
@@ -833,15 +837,171 @@ fn do_reload(
             }
         }
         Err(e) => {
+            metrics.record_config_reload_failure();
             let now = std::time::Instant::now();
             let should_log = last_error
                 .map(|t| now.duration_since(t).as_secs() >= 5)
                 .unwrap_or(true);
             if should_log {
-                tracing::error!(error = %e, "config reload failed");
+                tracing::error!(error = %e, "config reload failed — keeping previous config");
                 *last_error = Some(now);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use tempfile::NamedTempFile;
+
+    fn make_valid_config_file() -> NamedTempFile {
+        let mut f = NamedTempFile::new().unwrap();
+        write!(
+            f,
+            r#"
+transport:
+  type: http
+  addr: "0.0.0.0:4000"
+  upstream: "http://localhost:3000/mcp"
+agents: {{}}
+rules:
+  block_patterns: []
+audits: []
+"#
+        )
+        .unwrap();
+        f
+    }
+
+    fn make_invalid_config_file() -> NamedTempFile {
+        let mut f = NamedTempFile::new().unwrap();
+        write!(f, "this: is: not: valid: yaml: [[[").unwrap();
+        f
+    }
+
+    fn initial_live() -> Arc<LiveConfig> {
+        Arc::new(LiveConfig::new(
+            {
+                let mut m = std::collections::HashMap::new();
+                m.insert(
+                    "sentinel".to_string(),
+                    arbit::config::AgentPolicy {
+                        allowed_tools: None,
+                        denied_tools: vec![],
+                        rate_limit: 60,
+                        tool_rate_limits: std::collections::HashMap::new(),
+                        upstream: None,
+                        api_key: None,
+                        timeout_secs: None,
+                        approval_required: vec![],
+                        hitl_timeout_secs: 60,
+                        shadow_tools: vec![],
+                        federate: false,
+                    },
+                );
+                m
+            },
+            vec![],
+            vec![],
+            None,
+            arbit::config::FilterMode::Block,
+            None,
+        ))
+    }
+
+    #[test]
+    fn reload_valid_config_updates_channel() {
+        let file = make_valid_config_file();
+        let live = initial_live();
+        let (tx, rx) = tokio::sync::watch::channel(Arc::clone(&live));
+        let metrics = GatewayMetrics::new().unwrap();
+        let mut last_error = None;
+
+        do_reload(
+            file.path().to_str().unwrap(),
+            &tx,
+            &metrics,
+            &mut last_error,
+        );
+
+        // Config was updated — "sentinel" agent is gone (valid config has empty agents).
+        let current = rx.borrow();
+        assert!(
+            !current.agents.contains_key("sentinel"),
+            "valid reload should replace config"
+        );
+        assert_eq!(
+            metrics
+                .render()
+                .contains("arbit_config_reload_failures_total"),
+            true
+        );
+        // Counter should be zero (no failure occurred)
+        assert!(
+            !metrics
+                .render()
+                .contains("arbit_config_reload_failures_total 1"),
+            "no failure should be recorded on successful reload"
+        );
+    }
+
+    #[test]
+    fn reload_invalid_yaml_preserves_previous_config() {
+        let file = make_invalid_config_file();
+        let live = initial_live();
+        let (tx, rx) = tokio::sync::watch::channel(Arc::clone(&live));
+        let metrics = GatewayMetrics::new().unwrap();
+        let mut last_error = None;
+
+        do_reload(
+            file.path().to_str().unwrap(),
+            &tx,
+            &metrics,
+            &mut last_error,
+        );
+
+        // Config must be unchanged — "sentinel" agent still present.
+        let current = rx.borrow();
+        assert!(
+            current.agents.contains_key("sentinel"),
+            "invalid config must not replace the running config"
+        );
+        // Failure counter incremented.
+        assert!(
+            metrics
+                .render()
+                .contains("arbit_config_reload_failures_total 1"),
+            "failure counter must be incremented on bad reload"
+        );
+    }
+
+    #[test]
+    fn reload_missing_file_preserves_previous_config() {
+        let live = initial_live();
+        let (tx, rx) = tokio::sync::watch::channel(Arc::clone(&live));
+        let metrics = GatewayMetrics::new().unwrap();
+        let mut last_error = None;
+
+        do_reload(
+            "/nonexistent/path/gateway.yml",
+            &tx,
+            &metrics,
+            &mut last_error,
+        );
+
+        let current = rx.borrow();
+        assert!(
+            current.agents.contains_key("sentinel"),
+            "missing file must not replace the running config"
+        );
+        assert!(
+            metrics
+                .render()
+                .contains("arbit_config_reload_failures_total 1"),
+            "failure counter must be incremented on missing file"
+        );
     }
 }
 

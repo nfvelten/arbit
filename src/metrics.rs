@@ -1,10 +1,13 @@
-use prometheus::{CounterVec, Encoder, Opts, Registry, TextEncoder};
+use prometheus::{Counter, CounterVec, Encoder, Opts, Registry, TextEncoder};
 
 pub struct GatewayMetrics {
     registry: Registry,
     requests: CounterVec,
     /// Per-agent token counter. Labels: `agent`, `direction` ("input" | "output").
     tokens: CounterVec,
+    /// Incremented each time a config reload attempt fails (parse or I/O error).
+    /// Kept at zero when all reloads succeed — useful for alerting on bad deploys.
+    config_reload_failures: Counter,
 }
 
 impl GatewayMetrics {
@@ -26,10 +29,17 @@ impl GatewayMetrics {
         )?;
         registry.register(Box::new(tokens.clone()))?;
 
+        let config_reload_failures = Counter::new(
+            "arbit_config_reload_failures_total",
+            "Number of times a config reload attempt failed (parse or I/O error)",
+        )?;
+        registry.register(Box::new(config_reload_failures.clone()))?;
+
         Ok(Self {
             registry,
             requests,
             tokens,
+            config_reload_failures,
         })
     }
 
@@ -52,6 +62,12 @@ impl GatewayMetrics {
                 .with_label_values(&[agent, "output"])
                 .inc_by(f64::from(output_tokens));
         }
+    }
+
+    /// Increment the config reload failure counter.
+    /// Called by the hot-reload task whenever `Config::from_file` returns an error.
+    pub fn record_config_reload_failure(&self) {
+        self.config_reload_failures.inc();
     }
 
     /// Render all metrics in Prometheus text exposition format.
