@@ -13,6 +13,7 @@ pub mod oauth;
 pub mod openai_bridge;
 pub mod prompt_injection;
 pub mod schema_cache;
+pub mod secrets;
 pub mod transport;
 pub mod upstream;
 pub mod verify;

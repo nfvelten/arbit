@@ -3,7 +3,8 @@ use arbit::{
         AuditLog, fanout::FanoutAudit, openlineage::OpenLineageAudit, sqlite::SqliteAudit,
         stdout::StdoutAudit, webhook::WebhookAudit,
     },
-    config::{AuditConfig, Config, TelemetryConfig, TransportConfig},
+    config::{AuditConfig, Config, SecretsConfig, TelemetryConfig, TransportConfig},
+    env_config,
     gateway::McpGateway,
     hitl::HitlStore,
     jwt::MultiJwtValidator,
@@ -17,6 +18,7 @@ use arbit::{
     oauth::OAuthManager,
     prompt_injection,
     schema_cache::SchemaCache,
+    secrets::{self, openbao::OpenBaoProvider},
     transport::{Transport, http::HttpTransport, stdio::StdioTransport},
     upstream::{McpUpstream, http::HttpUpstream},
 };
@@ -159,7 +161,7 @@ async fn main() -> anyhow::Result<()> {
 // ── start ──────────────────────────────────────────────────────────────────────
 
 async fn cmd_start(config_path: String) -> anyhow::Result<()> {
-    let config = Config::from_file(&config_path)?;
+    let config = load_config(&config_path).await?;
 
     let _otel_guard = init_tracing(config.telemetry.as_ref());
 
@@ -391,6 +393,56 @@ async fn cmd_start(config_path: String) -> anyhow::Result<()> {
     audit.flush().await;
     tracing::info!("shutdown complete");
     Ok(())
+}
+
+// ── Config loading with optional secrets injection ────────────────────────────
+
+/// Two-stage config loader:
+/// 1. Parse YAML (with env-var interpolation) into a `serde_json::Value`.
+/// 2. If a `secrets:` block is present, authenticate to the provider, resolve
+///    all declared paths, and inject the values before final deserialization.
+/// 3. Apply env-var overrides and validate as usual.
+async fn load_config(path: &str) -> anyhow::Result<Config> {
+    let raw = std::fs::read_to_string(path)
+        .map_err(|e| anyhow::anyhow!("could not read '{}': {}", path, e))?;
+    let interpolated = env_config::interpolate_env_vars(&raw)?;
+
+    // Parse YAML into a generic JSON value so we can inject secrets.
+    let mut value: serde_json::Value = serde_yaml::from_str(&interpolated)
+        .map_err(|e| anyhow::anyhow!("invalid config: {}", e))?;
+
+    // Resolve secrets if configured.
+    if let Some(secrets_val) = value.get("secrets").cloned() {
+        let secrets_cfg: SecretsConfig = serde_json::from_value(secrets_val)
+            .map_err(|e| anyhow::anyhow!("invalid secrets config: {}", e))?;
+
+        if secrets_cfg.provider != "openbao" {
+            anyhow::bail!("unknown secrets provider: '{}'", secrets_cfg.provider);
+        }
+
+        tracing::info!(
+            paths = secrets_cfg.paths.len(),
+            "resolving secrets from OpenBao"
+        );
+        let provider = OpenBaoProvider::new(&secrets_cfg.address, &secrets_cfg.auth.method).await?;
+        let resolved = secrets::resolve_all(&provider, &secrets_cfg.paths).await;
+
+        let missing = secrets_cfg.paths.len().saturating_sub(resolved.len());
+        if missing > 0 {
+            anyhow::bail!(
+                "{missing} secret(s) could not be resolved — check OpenBao connectivity and policies"
+            );
+        }
+
+        secrets::inject_into_value(&mut value, &resolved);
+        tracing::info!(injected = resolved.len(), "secrets injected into config");
+    }
+
+    let mut config: Config = serde_json::from_value(value)
+        .map_err(|e| anyhow::anyhow!("invalid config after secret injection: {}", e))?;
+    env_config::apply_env_overrides(&mut config);
+    config.validate()?;
+    Ok(config)
 }
 
 // ── validate ───────────────────────────────────────────────────────────────────

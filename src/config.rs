@@ -30,6 +30,10 @@ pub struct Config {
     pub admin_token: Option<String>,
     /// OpenTelemetry tracing — exports spans to an OTLP endpoint.
     pub telemetry: Option<TelemetryConfig>,
+    /// Secret management backend — fetches secrets at startup and injects
+    /// them into the config before the gateway starts.
+    #[serde(default)]
+    pub secrets: Option<SecretsConfig>,
 }
 
 // ── Transport ────────────────────────────────────────────────────────────────
@@ -536,6 +540,56 @@ pub struct Rules {
     pub filter_mode: FilterMode,
 }
 
+// ── Secrets ───────────────────────────────────────────────────────────────────
+
+/// Top-level `secrets:` block. Currently only `provider: openbao` is supported.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SecretsConfig {
+    /// Secret backend — only `"openbao"` is recognised.
+    pub provider: String,
+    /// Base URL of the OpenBao / Vault server (e.g. `https://bao.internal:8200`).
+    pub address: String,
+    /// Authentication method for obtaining a token.
+    pub auth: OpenBaoAuthConfig,
+    /// Map of config-key (dot-notation) → Vault path.
+    ///
+    /// The Vault path may include a `#field` fragment to select a specific key
+    /// from a KV v2 secret (e.g. `secret/data/agents/cursor#api_key`).
+    /// Without a fragment the key `"value"` is used.
+    #[serde(default)]
+    pub paths: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct OpenBaoAuthConfig {
+    pub method: OpenBaoAuthMethod,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "method", rename_all = "lowercase")]
+pub enum OpenBaoAuthMethod {
+    /// Static token — suitable for local development and testing.
+    Token { token: String },
+    /// AppRole — suitable for CI/CD and non-Kubernetes environments.
+    Approle { role_id: String, secret_id: String },
+    /// Kubernetes service account JWT exchange — suitable for in-cluster deployments.
+    Kubernetes {
+        role: String,
+        #[serde(default = "default_k8s_jwt_path")]
+        jwt_path: String,
+        #[serde(default = "default_k8s_mount")]
+        mount: String,
+    },
+}
+
+pub fn default_k8s_jwt_path() -> String {
+    "/var/run/secrets/kubernetes.io/serviceaccount/token".to_string()
+}
+
+pub fn default_k8s_mount() -> String {
+    "kubernetes".to_string()
+}
+
 #[cfg(test)]
 pub(crate) fn make_agent(
     allowed: Option<Vec<&str>>,
@@ -588,7 +642,7 @@ impl Config {
         }
     }
 
-    fn validate(&self) -> anyhow::Result<()> {
+    pub fn validate(&self) -> anyhow::Result<()> {
         // Validate block_patterns are valid regexes
         for pattern in &self.rules.block_patterns {
             Regex::new(pattern)
@@ -674,6 +728,7 @@ mod tests {
             auth: None,
             admin_token: None,
             telemetry: None,
+            secrets: None,
         }
     }
 

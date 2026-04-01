@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Added
+- **OpenBao secret management** (`secrets/`, `config.rs`): native integration with OpenBao (Vault-compatible). Declare a `secrets:` block in `gateway.yml` to fetch secret values at startup and inject them into the config before the gateway starts. Supports `token`, `approle`, and `kubernetes` auth methods. The `SecretsProvider` trait enables mocking in tests. Closes #22.
 - **OAuth 2.1 + PKCE for upstream authentication** (`oauth.rs`, `upstream/http.rs`, `transport/http.rs`): arbit can now authenticate itself to upstream MCP servers using the authorization code flow with PKCE (RFC 7636). Configure `oauth:` under a named upstream, visit the printed authorization URL once, and arbit refreshes tokens automatically. The `/oauth/callback` endpoint handles the provider redirect. Closes #3.
 
 ---
