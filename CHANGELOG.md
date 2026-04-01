@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Fixed
+- **`SchemaCache` replaced with LRU-bounded cache** (`schema_cache.rs`): the previous `HashMap` grew without bound — every new `(agent_id, tool_name)` pair was retained forever. Replaced with `lru::LruCache` capped at 1024 entries; least-recently-used schemas are evicted automatically when the limit is reached. Closes #36.
 - **Hot-reload preserves running config on invalid `gateway.yml`**: if `Config::from_file` returns any error (syntax, I/O, unknown fields), the watch channel is not updated and the previous config remains active. The error is logged via `tracing::error!` with the message `"config reload failed — keeping previous config"`. The new `arbit_config_reload_failures_total` Prometheus counter is incremented on each failure for alerting. Closes #35.
 ## [Unreleased]
 
