@@ -32,6 +32,7 @@ mod tests {
             denied_resources: vec![],
             allowed_prompts: None,
             denied_prompts: vec![],
+            mtls_identity: None,
         }
     }
 
@@ -139,6 +140,7 @@ mod tests {
                 denied_resources: vec![],
                 allowed_prompts: None,
                 denied_prompts: vec![],
+                mtls_identity: None,
             },
         );
         let mw = make_mw(agents, None);

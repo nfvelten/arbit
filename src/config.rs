@@ -96,6 +96,10 @@ pub struct BinaryVerifyConfig {
 pub struct TlsConfig {
     pub cert: String,
     pub key: String,
+    /// Path to the PEM-encoded CA certificate used to verify client certificates.
+    /// When set, the server requests a client certificate (mTLS mode).
+    #[serde(default)]
+    pub client_ca: Option<String>,
 }
 
 impl Default for TransportConfig {
@@ -254,6 +258,10 @@ pub struct AgentPolicy {
     /// Prompt names explicitly denied. Takes priority over `allowed_prompts`.
     #[serde(default)]
     pub denied_prompts: Vec<String>,
+    /// TLS client certificate CN (Common Name) that identifies this agent.
+    /// When set, the agent can authenticate via mTLS instead of an API key.
+    #[serde(default)]
+    pub mtls_identity: Option<String>,
 }
 
 fn default_rate_limit() -> usize {
@@ -649,6 +657,7 @@ pub(crate) fn make_agent(
         denied_resources: vec![],
         allowed_prompts: None,
         denied_prompts: vec![],
+        mtls_identity: None,
     }
 }
 

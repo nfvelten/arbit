@@ -1149,6 +1149,7 @@ mod tests {
                 denied_resources: vec![],
                 allowed_prompts: None,
                 denied_prompts: vec![],
+                mtls_identity: None,
             },
         );
         make_gw(agents, vec![])
@@ -1242,6 +1243,7 @@ mod tests {
                 denied_resources: vec![],
                 allowed_prompts: None,
                 denied_prompts: vec![],
+                mtls_identity: None,
             },
         );
         let live = Arc::new(LiveConfig::new(
@@ -1391,6 +1393,7 @@ mod tests {
                 denied_resources: vec![],
                 allowed_prompts: None,
                 denied_prompts: vec![],
+                mtls_identity: None,
             },
         );
         let live = Arc::new(LiveConfig::new(
@@ -1617,6 +1620,7 @@ mod tests {
                 denied_resources: vec![],
                 allowed_prompts: None,
                 denied_prompts: vec![],
+                mtls_identity: None,
             },
         );
         let live = Arc::new(LiveConfig::new(

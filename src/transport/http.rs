@@ -191,8 +191,20 @@ impl Transport for HttpTransport {
             .with_state(state);
 
         if let Some(tls) = &self.tls {
-            tracing::info!(addr = %self.addr, "HTTPS mode listening");
-            serve_tls(app, &self.addr, &tls.cert, &tls.key).await
+            let mode = if tls.client_ca.is_some() {
+                "HTTPS+mTLS"
+            } else {
+                "HTTPS"
+            };
+            tracing::info!(addr = %self.addr, "{mode} mode listening");
+            serve_tls(
+                app,
+                &self.addr,
+                &tls.cert,
+                &tls.key,
+                tls.client_ca.as_deref(),
+            )
+            .await
         } else {
             tracing::info!(addr = %self.addr, "HTTP mode listening");
             let listener = tokio::net::TcpListener::bind(&self.addr).await?;
@@ -209,12 +221,14 @@ impl Transport for HttpTransport {
 
 // ── TLS ───────────────────────────────────────────────────────────────────────
 
-async fn serve_tls(app: Router, addr: &str, cert: &str, key: &str) -> anyhow::Result<()> {
-    use axum_server::tls_rustls::RustlsConfig;
-
-    let tls_config = RustlsConfig::from_pem_file(cert, key).await?;
+async fn serve_tls(
+    app: Router,
+    addr: &str,
+    cert: &str,
+    key: &str,
+    client_ca: Option<&str>,
+) -> anyhow::Result<()> {
     let addr: std::net::SocketAddr = addr.parse()?;
-
     let handle = axum_server::Handle::new();
     let h = handle.clone();
     tokio::spawn(async move {
@@ -222,11 +236,160 @@ async fn serve_tls(app: Router, addr: &str, cert: &str, key: &str) -> anyhow::Re
         h.graceful_shutdown(Some(std::time::Duration::from_secs(30)));
     });
 
-    axum_server::bind_rustls(addr, tls_config)
-        .handle(handle)
-        .serve(app.into_make_service_with_connect_info::<SocketAddr>())
-        .await?;
+    if let Some(ca_path) = client_ca {
+        // mTLS: build rustls ServerConfig that requests client certificates.
+        let server_config = build_mtls_config(cert, key, ca_path)?;
+        let acceptor = MtlsAcceptor::new(server_config);
+        axum_server::bind(addr)
+            .handle(handle)
+            .acceptor(acceptor)
+            .serve(app.into_make_service_with_connect_info::<SocketAddr>())
+            .await?;
+    } else {
+        use axum_server::tls_rustls::RustlsConfig;
+        let tls_config = RustlsConfig::from_pem_file(cert, key).await?;
+        axum_server::bind_rustls(addr, tls_config)
+            .handle(handle)
+            .serve(app.into_make_service_with_connect_info::<SocketAddr>())
+            .await?;
+    }
     Ok(())
+}
+
+// ── mTLS acceptor ────────────────────────────────────────────────────────────
+
+/// Internal header name used to pass the mTLS peer CN from the acceptor to the handler.
+/// Clients cannot spoof this because `CertInjectedService` always strips it before setting.
+const MTLS_CN_HEADER: &str = "x-arbit-mtls-cn";
+
+/// Builds a `rustls::ServerConfig` that requires client certificate verification
+/// using the supplied CA PEM file.
+fn build_mtls_config(
+    cert_path: &str,
+    key_path: &str,
+    ca_path: &str,
+) -> anyhow::Result<Arc<rustls::ServerConfig>> {
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+    use rustls::server::WebPkiClientVerifier;
+    use rustls_pemfile::{certs, private_key};
+    use std::fs::File;
+    use std::io::BufReader;
+
+    // Load server cert chain
+    let cert_file = File::open(cert_path)?;
+    let server_certs: Vec<CertificateDer<'static>> =
+        certs(&mut BufReader::new(cert_file)).collect::<Result<_, _>>()?;
+
+    // Load server private key
+    let key_file = File::open(key_path)?;
+    let server_key: PrivateKeyDer<'static> = private_key(&mut BufReader::new(key_file))?
+        .ok_or_else(|| anyhow::anyhow!("no private key found in {key_path}"))?;
+
+    // Load CA cert for client verification
+    let ca_file = File::open(ca_path)?;
+    let ca_certs: Vec<CertificateDer<'static>> =
+        certs(&mut BufReader::new(ca_file)).collect::<Result<_, _>>()?;
+    let mut root_store = rustls::RootCertStore::empty();
+    for ca in ca_certs {
+        root_store.add(ca)?;
+    }
+
+    let verifier = WebPkiClientVerifier::builder(Arc::new(root_store)).build()?;
+    let config = rustls::ServerConfig::builder()
+        .with_client_cert_verifier(verifier)
+        .with_single_cert(server_certs, server_key)?;
+    Ok(Arc::new(config))
+}
+
+/// Extracts the CN from the first peer certificate on a TLS stream.
+fn extract_peer_cn(
+    stream: &tokio_rustls::server::TlsStream<tokio::net::TcpStream>,
+) -> Option<String> {
+    let (_, server_conn) = stream.get_ref();
+    let certs = server_conn.peer_certificates()?;
+    let cert = certs.first()?;
+    let (_, parsed) = x509_parser::parse_x509_certificate(cert).ok()?;
+    parsed
+        .subject()
+        .iter_common_name()
+        .next()
+        .and_then(|attr| attr.as_str().ok())
+        .map(|s| s.to_string())
+}
+
+/// Tower `Service` wrapper that injects a [`PeerCertCn`] extension into every request.
+#[derive(Clone)]
+struct CertInjectedService<S> {
+    inner: S,
+    cn: Option<String>,
+}
+
+impl<S, ReqBody> tower::Service<axum::http::Request<ReqBody>> for CertInjectedService<S>
+where
+    S: tower::Service<axum::http::Request<ReqBody>>,
+    S::Error: 'static,
+{
+    type Response = S::Response;
+    type Error = S::Error;
+    type Future = S::Future;
+
+    fn poll_ready(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), <S as tower::Service<axum::http::Request<ReqBody>>>::Error>>
+    {
+        self.inner.poll_ready(cx)
+    }
+
+    fn call(&mut self, mut req: axum::http::Request<ReqBody>) -> Self::Future {
+        // Always strip the client-provided header (prevent spoofing), then
+        // set the server-authoritative value when a peer cert was presented.
+        req.headers_mut().remove(MTLS_CN_HEADER);
+        if let Some(cn) = &self.cn
+            && let Ok(val) = axum::http::HeaderValue::from_str(cn)
+        {
+            req.headers_mut()
+                .insert(axum::http::HeaderName::from_static(MTLS_CN_HEADER), val);
+        }
+        self.inner.call(req)
+    }
+}
+
+/// Custom `axum_server` acceptor that performs the TLS handshake and extracts
+/// the peer certificate CN, injecting it into a [`CertInjectedService`] wrapper.
+#[derive(Clone)]
+struct MtlsAcceptor {
+    acceptor: tokio_rustls::TlsAcceptor,
+}
+
+impl MtlsAcceptor {
+    fn new(config: Arc<rustls::ServerConfig>) -> Self {
+        Self {
+            acceptor: tokio_rustls::TlsAcceptor::from(config),
+        }
+    }
+}
+
+impl<S> axum_server::accept::Accept<tokio::net::TcpStream, S> for MtlsAcceptor
+where
+    S: Clone + Send + 'static,
+{
+    type Stream = tokio_rustls::server::TlsStream<tokio::net::TcpStream>;
+    type Service = CertInjectedService<S>;
+    type Future = std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = std::io::Result<(Self::Stream, Self::Service)>> + Send,
+        >,
+    >;
+
+    fn accept(&self, stream: tokio::net::TcpStream, service: S) -> Self::Future {
+        let acceptor = self.acceptor.clone();
+        Box::pin(async move {
+            let tls_stream = acceptor.accept(stream).await?;
+            let cn = extract_peer_cn(&tls_stream);
+            Ok((tls_stream, CertInjectedService { inner: service, cn }))
+        })
+    }
 }
 
 // ── Shutdown signal ───────────────────────────────────────────────────────────
@@ -333,6 +496,50 @@ async fn handle_mcp(
                 Err(e) => {
                     tracing::warn!(error = %e, "JWT validation failed");
                     return StatusCode::UNAUTHORIZED.into_response();
+                }
+            }
+        }
+
+        // mTLS auth: if the acceptor injected a peer cert CN, map it to an agent name.
+        // The header is stripped and set by CertInjectedService, so it cannot be spoofed.
+        // cfg is resolved inside a block so the watch::Ref (non-Send) is dropped before any .await.
+        let mtls_agent: Option<Result<String, ()>> = headers
+            .get(MTLS_CN_HEADER)
+            .and_then(|v| v.to_str().ok())
+            .map(|cn| {
+                let cfg = state.config.borrow();
+                match cfg.mtls_identities.get(cn) {
+                    Some(name) => Ok(name.clone()),
+                    None => {
+                        tracing::warn!(cn, "client cert CN not mapped to any agent");
+                        Err(())
+                    }
+                }
+            });
+        if let Some(result) = mtls_agent {
+            match result {
+                Err(()) => return StatusCode::UNAUTHORIZED.into_response(),
+                Ok(agent_name) => {
+                    let session_id = state.sessions.create(agent_name.clone()).await;
+                    tracing::info!(session_id, agent = agent_name, "mTLS session created");
+                    let (response, rl, request_id) =
+                        state.gateway.handle(&agent_name, msg, client_ip).await;
+                    return match response {
+                        Some(body) => {
+                            let mut res = Json(body).into_response();
+                            if let Ok(val) = HeaderValue::from_str(&session_id) {
+                                res.headers_mut().insert("mcp-session-id", val);
+                            }
+                            if let Ok(val) = HeaderValue::from_str(&request_id) {
+                                res.headers_mut().insert("x-request-id", val);
+                            }
+                            if let Some(rl) = &rl {
+                                insert_rl_headers(&mut res, rl);
+                            }
+                            res
+                        }
+                        None => StatusCode::ACCEPTED.into_response(),
+                    };
                 }
             }
         }

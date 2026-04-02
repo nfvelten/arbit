@@ -1048,6 +1048,7 @@ audits: []
                         denied_resources: vec![],
                         allowed_prompts: None,
                         denied_prompts: vec![],
+                        mtls_identity: None,
                     },
                 );
                 m

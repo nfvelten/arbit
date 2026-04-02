@@ -29,6 +29,9 @@ pub struct LiveConfig {
     pub default_policy: Option<AgentPolicy>,
     /// Pre-loaded OPA policy for contextual access control. None = OPA disabled.
     pub opa_policy: Option<Arc<OpaPolicy>>,
+    /// Reverse map: client cert CN → agent_name.
+    /// Built from agents whose policy has `mtls_identity` set.
+    pub mtls_identities: HashMap<String, String>,
 }
 
 #[cfg(test)]
@@ -54,6 +57,7 @@ mod tests {
             denied_resources: vec![],
             allowed_prompts: None,
             denied_prompts: vec![],
+            mtls_identity: None,
         }
     }
 
@@ -74,6 +78,7 @@ mod tests {
             denied_resources: vec![],
             allowed_prompts: None,
             denied_prompts: vec![],
+            mtls_identity: None,
         }
     }
 
@@ -186,6 +191,74 @@ mod tests {
         );
         assert_eq!(live2.filter_mode, FilterMode::Block);
     }
+
+    fn policy_with_mtls(cn: &str) -> AgentPolicy {
+        AgentPolicy {
+            allowed_tools: None,
+            denied_tools: vec![],
+            rate_limit: 60,
+            tool_rate_limits: HashMap::new(),
+            upstream: None,
+            api_key: None,
+            timeout_secs: None,
+            approval_required: vec![],
+            hitl_timeout_secs: 60,
+            shadow_tools: vec![],
+            federate: false,
+            allowed_resources: None,
+            denied_resources: vec![],
+            allowed_prompts: None,
+            denied_prompts: vec![],
+            mtls_identity: Some(cn.to_string()),
+        }
+    }
+
+    #[test]
+    fn mtls_identities_reverse_map_built_correctly() {
+        let mut agents = HashMap::new();
+        agents.insert(
+            "cursor".to_string(),
+            policy_with_mtls("cursor.agents.internal"),
+        );
+        agents.insert(
+            "claude".to_string(),
+            policy_with_mtls("claude.agents.internal"),
+        );
+        let live = LiveConfig::new(agents, vec![], vec![], None, FilterMode::Block, None);
+        assert_eq!(
+            live.mtls_identities
+                .get("cursor.agents.internal")
+                .map(String::as_str),
+            Some("cursor")
+        );
+        assert_eq!(
+            live.mtls_identities
+                .get("claude.agents.internal")
+                .map(String::as_str),
+            Some("claude")
+        );
+        assert_eq!(live.mtls_identities.len(), 2);
+    }
+
+    #[test]
+    fn agent_without_mtls_identity_not_in_map() {
+        let mut agents = HashMap::new();
+        agents.insert("anon".to_string(), policy_no_key());
+        let live = LiveConfig::new(agents, vec![], vec![], None, FilterMode::Block, None);
+        assert!(live.mtls_identities.is_empty());
+    }
+
+    #[test]
+    fn mixed_mtls_and_key_agents_only_mtls_in_mtls_map() {
+        let mut agents = HashMap::new();
+        agents.insert("mtls_agent".to_string(), policy_with_mtls("agent.cn"));
+        agents.insert("key_agent".to_string(), policy_with_key("k1"));
+        let live = LiveConfig::new(agents, vec![], vec![], None, FilterMode::Block, None);
+        assert_eq!(live.mtls_identities.len(), 1);
+        assert!(live.mtls_identities.contains_key("agent.cn"));
+        assert_eq!(live.api_keys.len(), 1);
+        assert!(live.api_keys.contains_key("k1"));
+    }
 }
 
 impl LiveConfig {
@@ -201,6 +274,14 @@ impl LiveConfig {
             .iter()
             .filter_map(|(name, p)| p.api_key.as_ref().map(|k| (k.clone(), name.clone())))
             .collect();
+        let mtls_identities = agents
+            .iter()
+            .filter_map(|(name, p)| {
+                p.mtls_identity
+                    .as_ref()
+                    .map(|cn| (cn.clone(), name.clone()))
+            })
+            .collect();
         Self {
             agents,
             block_patterns: Arc::new(block_patterns),
@@ -210,6 +291,7 @@ impl LiveConfig {
             filter_mode,
             default_policy,
             opa_policy: None,
+            mtls_identities,
         }
     }
 

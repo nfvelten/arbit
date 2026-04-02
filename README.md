@@ -18,7 +18,7 @@ Agent (Cursor, Claude, etc.)
 
 ## What it does
 
-- **Auth** — each agent gets an explicit allowlist or denylist of tools; glob wildcards supported (`read_*`, `fs/*`) with O(n·m) matching (no ReDoS); optional pre-shared API key or JWT/OIDC
+- **Auth** — each agent gets an explicit allowlist or denylist of tools; glob wildcards supported (`read_*`, `fs/*`) with O(n·m) matching (no ReDoS); optional pre-shared API key, JWT/OIDC, or mTLS (client certificate CN)
 - **tools/list filtering** — agents only see the tools they are allowed to call (wildcards respected)
 - **Rate limiting** — per-agent sliding window (calls/min) + per-tool limits + per-IP limit; standard `X-RateLimit-*` headers on every response
 - **Human-in-the-Loop (HITL)** — tools in `approval_required` suspend execution until an operator approves or rejects via REST API; configurable timeout with auto-rejection
@@ -745,6 +745,28 @@ transport:
     cert: "cert.pem"
     key:  "key.pem"
 ```
+
+### mTLS agent authentication
+
+Set `tls.client_ca` to a PEM file containing the CA certificate used to sign agent client certs. The gateway will require and verify a client certificate on every connection. The verified CN is matched against `mtls_identity` in the agent policy — no API key is needed:
+
+```yaml
+transport:
+  type: http
+  addr: "0.0.0.0:4443"
+  upstream: "http://localhost:3000/mcp"
+  tls:
+    cert: "server.pem"
+    key:  "server-key.pem"
+    client_ca: "agent-ca.pem"   # enables mTLS
+
+agents:
+  cursor:
+    mtls_identity: "cursor.agents.internal"   # must match client cert CN
+    allowed_tools: ["read_file", "list_dir"]
+```
+
+Authentication priority: JWT Bearer → mTLS cert CN → `X-Api-Key` → `clientInfo.name` (no auth).
 
 ### stdio mode
 
