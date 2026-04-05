@@ -260,7 +260,7 @@ async fn serve_tls(
 
 /// Internal header name used to pass the mTLS peer CN from the acceptor to the handler.
 /// Clients cannot spoof this because `CertInjectedService` always strips it before setting.
-const MTLS_CN_HEADER: &str = "x-arbit-mtls-cn";
+const MTLS_CN_HEADER: &str = "x-arbitus-mtls-cn";
 
 /// Builds a `rustls::ServerConfig` that requires client certificate verification
 /// using the supplied CA PEM file.
@@ -959,7 +959,7 @@ async fn handle_dashboard(
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>arbit — dashboard</title>
+<title>arbitus — dashboard</title>
 <style>
 *{{box-sizing:border-box}}
 body{{font-family:system-ui,sans-serif;margin:0;background:#f0f2f5;color:#1a1a2e}}
@@ -1023,7 +1023,7 @@ tr:hover td{{background:#fafafa}}
 </head>
 <body>
 <header>
-  <h1>arbit</h1>
+  <h1>arbitus</h1>
   <span class="sub">audit dashboard</span>
   <button class="refresh-btn" onclick="location.href='{refresh_url}'">↻ Refresh</button>
 </header>

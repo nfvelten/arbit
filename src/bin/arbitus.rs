@@ -1,5 +1,5 @@
-use arbit::live_config::OpaPolicy;
-use arbit::{
+use arbitus::live_config::OpaPolicy;
+use arbitus::{
     audit::{
         AuditLog,
         fanout::FanoutAudit,
@@ -39,7 +39,7 @@ use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitEx
 
 #[derive(Parser)]
 #[command(
-    name = "arbit",
+    name = "arbitus",
     about = "Security proxy for MCP servers — auth, rate limiting, payload filtering, and audit",
     version
 )]
@@ -47,7 +47,7 @@ struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
 
-    /// Config file path (shorthand for `arbit start <config>`)
+    /// Config file path (shorthand for `arbitus start <config>`)
     #[arg(global = false)]
     config: Option<String>,
 }
@@ -126,7 +126,7 @@ enum Command {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Support legacy invocation `arbit gateway.yml` (no subcommand)
+    // Support legacy invocation `arbitus gateway.yml` (no subcommand)
     let args: Vec<String> = std::env::args().collect();
     let has_subcommand = args
         .get(1)
@@ -147,7 +147,7 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or(false);
 
     let config_path = if !has_subcommand && args.len() > 1 && !args[1].starts_with('-') {
-        // Legacy: `arbit gateway.yml`
+        // Legacy: `arbitus gateway.yml`
         args[1].clone()
     } else {
         let cli = Cli::parse();
@@ -338,7 +338,7 @@ async fn cmd_start(config_path: String) -> anyhow::Result<()> {
                 tracing::info!(
                     upstream = %name,
                     url = %auth_url,
-                    "OAuth authorization required — visit the URL to authorize arbit"
+                    "OAuth authorization required — visit the URL to authorize arbitus"
                 );
                 Arc::new(HttpUpstream::with_oauth(
                     def.url(),
@@ -919,7 +919,7 @@ fn build_audit_backend(
     }
 }
 
-fn load_opa_policy(cfg: Option<&arbit::config::OpaConfig>) -> Option<Arc<OpaPolicy>> {
+fn load_opa_policy(cfg: Option<&arbitus::config::OpaConfig>) -> Option<Arc<OpaPolicy>> {
     let cfg = cfg?;
     match std::fs::read_to_string(&cfg.policy_path) {
         Ok(content) => {
@@ -1032,7 +1032,7 @@ audits: []
                 let mut m = std::collections::HashMap::new();
                 m.insert(
                     "sentinel".to_string(),
-                    arbit::config::AgentPolicy {
+                    arbitus::config::AgentPolicy {
                         allowed_tools: None,
                         denied_tools: vec![],
                         rate_limit: 60,
@@ -1056,7 +1056,7 @@ audits: []
             vec![],
             vec![],
             None,
-            arbit::config::FilterMode::Block,
+            arbitus::config::FilterMode::Block,
             None,
         ))
     }
@@ -1085,14 +1085,14 @@ audits: []
         assert_eq!(
             metrics
                 .render()
-                .contains("arbit_config_reload_failures_total"),
+                .contains("arbitus_config_reload_failures_total"),
             true
         );
         // Counter should be zero (no failure occurred)
         assert!(
             !metrics
                 .render()
-                .contains("arbit_config_reload_failures_total 1"),
+                .contains("arbitus_config_reload_failures_total 1"),
             "no failure should be recorded on successful reload"
         );
     }
@@ -1122,7 +1122,7 @@ audits: []
         assert!(
             metrics
                 .render()
-                .contains("arbit_config_reload_failures_total 1"),
+                .contains("arbitus_config_reload_failures_total 1"),
             "failure counter must be incremented on bad reload"
         );
     }
@@ -1149,7 +1149,7 @@ audits: []
         assert!(
             metrics
                 .render()
-                .contains("arbit_config_reload_failures_total 1"),
+                .contains("arbitus_config_reload_failures_total 1"),
             "failure counter must be incremented on missing file"
         );
     }
@@ -1225,5 +1225,5 @@ fn build_otel_tracer(tel: &TelemetryConfig) -> anyhow::Result<opentelemetry_sdk:
         .install_batch(Tokio)
         .map_err(|e| anyhow::anyhow!("OTLP pipeline: {e}"))?;
 
-    Ok(provider.tracer("arbit"))
+    Ok(provider.tracer("arbitus"))
 }

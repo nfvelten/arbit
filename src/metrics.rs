@@ -17,29 +17,32 @@ impl GatewayMetrics {
         let registry = Registry::new();
 
         let requests = CounterVec::new(
-            Opts::new("arbit_requests_total", "Total requests processed by arbit"),
+            Opts::new(
+                "arbitus_requests_total",
+                "Total requests processed by arbitus",
+            ),
             &["agent", "outcome"],
         )?;
         registry.register(Box::new(requests.clone()))?;
 
         let tokens = CounterVec::new(
             Opts::new(
-                "arbit_tokens_total",
-                "Estimated token count processed by arbit (4-chars-per-token heuristic)",
+                "arbitus_tokens_total",
+                "Estimated token count processed by arbitus (4-chars-per-token heuristic)",
             ),
             &["agent", "direction"],
         )?;
         registry.register(Box::new(tokens.clone()))?;
 
         let config_reload_failures = Counter::new(
-            "arbit_config_reload_failures_total",
+            "arbitus_config_reload_failures_total",
             "Number of times a config reload attempt failed (parse or I/O error)",
         )?;
         registry.register(Box::new(config_reload_failures.clone()))?;
 
         let audit_drops = CounterVec::new(
             Opts::new(
-                "arbit_audit_drops_total",
+                "arbitus_audit_drops_total",
                 "Audit entries dropped because the backend channel was full",
             ),
             &["backend"],
@@ -107,7 +110,7 @@ mod tests {
         let m = GatewayMetrics::new().unwrap();
         m.record_tokens("agent-a", 10, 25);
         let rendered = m.render();
-        assert!(rendered.contains("arbit_tokens_total"));
+        assert!(rendered.contains("arbitus_tokens_total"));
         assert!(rendered.contains(r#"direction="input""#));
         assert!(rendered.contains(r#"direction="output""#));
     }

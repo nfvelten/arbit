@@ -1,4 +1,4 @@
-/// Secret management backends for arbit.
+/// Secret management backends for arbitus.
 ///
 /// The `SecretsProvider` trait abstracts over different backends (OpenBao,
 /// mock). At startup the active provider resolves all paths declared in

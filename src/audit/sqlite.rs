@@ -550,7 +550,7 @@ mod tests {
         // At least one entry must have been dropped and the counter incremented.
         let rendered = metrics.render();
         assert!(
-            rendered.contains("arbit_audit_drops_total"),
+            rendered.contains("arbitus_audit_drops_total"),
             "drop counter must be registered"
         );
         // The counter value is non-deterministic (depends on how fast the worker

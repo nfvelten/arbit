@@ -10,7 +10,7 @@
 /// `data` object; if omitted the key `"value"` is used.
 ///
 /// ```text
-/// secret/data/arbit/admin_token            → data["value"]
+/// secret/data/arbitus/admin_token            → data["value"]
 /// secret/data/agents/cursor#api_key        → data["api_key"]
 /// ```
 use crate::config::OpenBaoAuthMethod;
@@ -190,8 +190,8 @@ mod tests {
 
     #[test]
     fn path_without_fragment_uses_value_field() {
-        let (path, field) = split_path("secret/data/arbit/admin_token");
-        assert_eq!(path, "secret/data/arbit/admin_token");
+        let (path, field) = split_path("secret/data/arbitus/admin_token");
+        assert_eq!(path, "secret/data/arbitus/admin_token");
         assert_eq!(field, "value");
     }
 

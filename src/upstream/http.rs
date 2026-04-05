@@ -148,7 +148,7 @@ impl McpUpstream for HttpUpstream {
             } else {
                 tracing::warn!(
                     upstream = %name,
-                    "OAuth token unavailable — visit the authorization URL to authorize arbit"
+                    "OAuth token unavailable — visit the authorization URL to authorize arbitus"
                 );
             }
         }

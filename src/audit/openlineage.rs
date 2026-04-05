@@ -6,16 +6,16 @@ use super::{AuditEntry, AuditLog, Outcome};
 ///
 /// ## Event mapping
 ///
-/// | OpenLineage field            | arbit source                                     |
+/// | OpenLineage field            | arbitus source                                   |
 /// |------------------------------|--------------------------------------------------|
 /// | `run.runId`                  | `entry.request_id` (UUID)                        |
-/// | `job.namespace`              | configurable `namespace` (default: `"arbit"`)    |
+/// | `job.namespace`              | configurable `namespace` (default: `"arbitus"`)  |
 /// | `job.name`                   | `<agent_id>/<tool_name>`                         |
 /// | `eventType`                  | `COMPLETE` (allowed/forwarded) / `FAIL` (blocked)|
 /// | `eventTime`                  | `entry.ts` in RFC 3339 format                    |
-/// | `run.facets.arbit:execution` | outcome, reason, agent_id, input_tokens          |
+/// | `run.facets.arbitus:execution` | outcome, reason, agent_id, input_tokens          |
 /// | `inputs[0]`                  | `{namespace: agent_id, name: tool_name}`         |
-/// | `producer`                   | `"https://github.com/nfvelten/arbit"`            |
+/// | `producer`                   | `"https://github.com/nfvelten/arbitus"`          |
 use crate::metrics::GatewayMetrics;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -25,7 +25,7 @@ use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 use tokio::sync::mpsc;
 
-const PRODUCER: &str = "https://github.com/nfvelten/arbit";
+const PRODUCER: &str = "https://github.com/nfvelten/arbitus";
 const SCHEMA_URL: &str = "https://openlineage.io/spec/2-0-2/OpenLineage.json#/definitions/RunEvent";
 const CHANNEL_CAPACITY: usize = 4096;
 
@@ -129,7 +129,7 @@ pub fn build_run_event(entry: &AuditEntry, namespace: &str) -> Value {
         Outcome::Blocked(r) => ("FAIL", "blocked", Some(r.as_str())),
     };
 
-    // Execution facet — carries arbit-specific metadata.
+    // Execution facet — carries arbitus-specific metadata.
     let mut facet_data = json!({
         "_producer": PRODUCER,
         "_schemaURL": format!("{PRODUCER}/facets/execution"),
@@ -144,15 +144,15 @@ pub fn build_run_event(entry: &AuditEntry, namespace: &str) -> Value {
     // Arguments facet — only present when arguments were captured.
     let run_facets = if let Some(args) = &entry.arguments {
         json!({
-            "arbit:execution": facet_data,
-            "arbit:arguments": {
+            "arbitus:execution": facet_data,
+            "arbitus:arguments": {
                 "_producer": PRODUCER,
                 "_schemaURL": format!("{PRODUCER}/facets/arguments"),
                 "arguments": args
             }
         })
     } else {
-        json!({ "arbit:execution": facet_data })
+        json!({ "arbitus:execution": facet_data })
     };
 
     json!({
@@ -207,7 +207,7 @@ mod tests {
 
     #[test]
     fn allowed_produces_complete_event() {
-        let ev = build_run_event(&entry(Outcome::Allowed), "arbit");
+        let ev = build_run_event(&entry(Outcome::Allowed), "arbitus");
         assert_eq!(ev["eventType"], "COMPLETE");
         assert_eq!(ev["schemaURL"], SCHEMA_URL);
         assert_eq!(ev["producer"], PRODUCER);
@@ -215,31 +215,31 @@ mod tests {
 
     #[test]
     fn blocked_produces_fail_event() {
-        let ev = build_run_event(&entry(Outcome::Blocked("rate limit".into())), "arbit");
+        let ev = build_run_event(&entry(Outcome::Blocked("rate limit".into())), "arbitus");
         assert_eq!(ev["eventType"], "FAIL");
-        assert_eq!(ev["run"]["facets"]["arbit:execution"]["outcome"], "blocked");
+        assert_eq!(ev["run"]["facets"]["arbitus:execution"]["outcome"], "blocked");
         assert_eq!(
-            ev["run"]["facets"]["arbit:execution"]["reason"],
+            ev["run"]["facets"]["arbitus:execution"]["reason"],
             "rate limit"
         );
     }
 
     #[test]
     fn job_name_combines_agent_and_tool() {
-        let ev = build_run_event(&entry(Outcome::Allowed), "arbit");
+        let ev = build_run_event(&entry(Outcome::Allowed), "arbitus");
         assert_eq!(ev["job"]["name"], "cursor/read_file");
-        assert_eq!(ev["job"]["namespace"], "arbit");
+        assert_eq!(ev["job"]["namespace"], "arbitus");
     }
 
     #[test]
     fn run_id_matches_request_id() {
-        let ev = build_run_event(&entry(Outcome::Allowed), "arbit");
+        let ev = build_run_event(&entry(Outcome::Allowed), "arbitus");
         assert_eq!(ev["run"]["runId"], "550e8400-e29b-41d4-a716-446655440000");
     }
 
     #[test]
     fn input_dataset_uses_agent_and_tool() {
-        let ev = build_run_event(&entry(Outcome::Allowed), "arbit");
+        let ev = build_run_event(&entry(Outcome::Allowed), "arbitus");
         let inputs = ev["inputs"].as_array().unwrap();
         assert_eq!(inputs.len(), 1);
         assert_eq!(inputs[0]["namespace"], "cursor");
@@ -248,9 +248,9 @@ mod tests {
 
     #[test]
     fn arguments_facet_present_when_args_captured() {
-        let ev = build_run_event(&entry(Outcome::Allowed), "arbit");
+        let ev = build_run_event(&entry(Outcome::Allowed), "arbitus");
         assert_eq!(
-            ev["run"]["facets"]["arbit:arguments"]["arguments"]["path"],
+            ev["run"]["facets"]["arbitus:arguments"]["arguments"]["path"],
             "/etc/hosts"
         );
     }
@@ -267,17 +267,17 @@ mod tests {
             request_id: "req-1".to_string(),
             input_tokens: 0,
         });
-        let ev = build_run_event(&e, "arbit");
+        let ev = build_run_event(&e, "arbitus");
         assert!(
-            ev["run"]["facets"]["arbit:arguments"].is_null(),
+            ev["run"]["facets"]["arbitus:arguments"].is_null(),
             "arguments facet should be absent"
         );
     }
 
     #[test]
     fn input_tokens_in_execution_facet() {
-        let ev = build_run_event(&entry(Outcome::Allowed), "arbit");
-        assert_eq!(ev["run"]["facets"]["arbit:execution"]["input_tokens"], 8);
+        let ev = build_run_event(&entry(Outcome::Allowed), "arbitus");
+        assert_eq!(ev["run"]["facets"]["arbitus:execution"]["input_tokens"], 8);
     }
 
     #[test]
@@ -288,7 +288,7 @@ mod tests {
 
     #[test]
     fn event_time_is_rfc3339() {
-        let ev = build_run_event(&entry(Outcome::Allowed), "arbit");
+        let ev = build_run_event(&entry(Outcome::Allowed), "arbitus");
         let t = ev["eventTime"].as_str().unwrap();
         // Should parse as a valid RFC 3339 timestamp
         assert!(t.contains('T'), "eventTime should be ISO 8601: {t}");

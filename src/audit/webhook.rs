@@ -88,8 +88,8 @@ fn build_plain(entry: &AuditEntry) -> Value {
 fn build_cloudevent(entry: &AuditEntry, source: &str) -> Value {
     let (outcome_str, reason) = outcome_parts(&entry.outcome);
 
-    // type follows reverse-DNS convention: dev.arbit.audit.<outcome>
-    let ce_type = format!("dev.arbit.audit.{outcome_str}");
+    // type follows reverse-DNS convention: dev.arbitus.audit.<outcome>
+    let ce_type = format!("dev.arbitus.audit.{outcome_str}");
 
     // RFC 3339 timestamp
     let time: DateTime<Utc> = entry.ts.into();
@@ -188,20 +188,20 @@ mod tests {
 
     #[test]
     fn cloudevent_specversion_is_1_0() {
-        let body = build_cloudevent(&entry(Outcome::Allowed), "/arbit");
+        let body = build_cloudevent(&entry(Outcome::Allowed), "/arbitus");
         assert_eq!(body["specversion"], "1.0");
     }
 
     #[test]
     fn cloudevent_type_encodes_outcome() {
         let cases = [
-            (Outcome::Allowed, "dev.arbit.audit.allowed"),
-            (Outcome::Forwarded, "dev.arbit.audit.forwarded"),
-            (Outcome::Shadowed, "dev.arbit.audit.shadowed"),
-            (Outcome::Blocked("x".to_string()), "dev.arbit.audit.blocked"),
+            (Outcome::Allowed, "dev.arbitus.audit.allowed"),
+            (Outcome::Forwarded, "dev.arbitus.audit.forwarded"),
+            (Outcome::Shadowed, "dev.arbitus.audit.shadowed"),
+            (Outcome::Blocked("x".to_string()), "dev.arbitus.audit.blocked"),
         ];
         for (outcome, expected_type) in cases {
-            let body = build_cloudevent(&entry(outcome), "/arbit");
+            let body = build_cloudevent(&entry(outcome), "/arbitus");
             assert_eq!(body["type"], expected_type);
         }
     }
@@ -214,13 +214,13 @@ mod tests {
 
     #[test]
     fn cloudevent_id_is_request_id() {
-        let body = build_cloudevent(&entry(Outcome::Allowed), "/arbit");
+        let body = build_cloudevent(&entry(Outcome::Allowed), "/arbitus");
         assert_eq!(body["id"], "req-abc-123");
     }
 
     #[test]
     fn cloudevent_time_is_rfc3339() {
-        let body = build_cloudevent(&entry(Outcome::Allowed), "/arbit");
+        let body = build_cloudevent(&entry(Outcome::Allowed), "/arbitus");
         let time_str = body["time"].as_str().unwrap();
         // RFC 3339 contains 'T' and 'Z' or offset
         assert!(
@@ -231,7 +231,7 @@ mod tests {
 
     #[test]
     fn cloudevent_data_has_payload() {
-        let body = build_cloudevent(&entry(Outcome::Blocked("denied".to_string())), "/arbit");
+        let body = build_cloudevent(&entry(Outcome::Blocked("denied".to_string())), "/arbitus");
         assert_eq!(body["datacontenttype"], "application/json");
         assert_eq!(body["data"]["agent_id"], "cursor");
         assert_eq!(body["data"]["outcome"], "blocked");
@@ -242,15 +242,15 @@ mod tests {
     fn cloudevent_blocked_reason_in_data() {
         let body = build_cloudevent(
             &entry(Outcome::Blocked("tool denied".to_string())),
-            "/arbit",
+            "/arbitus",
         );
         assert_eq!(body["data"]["reason"], "tool denied");
     }
 
     #[test]
     fn cloudevent_shadowed_no_reason() {
-        let body = build_cloudevent(&entry(Outcome::Shadowed), "/arbit");
-        assert_eq!(body["type"], "dev.arbit.audit.shadowed");
+        let body = build_cloudevent(&entry(Outcome::Shadowed), "/arbitus");
+        assert_eq!(body["type"], "dev.arbitus.audit.shadowed");
         assert!(body["data"]["reason"].is_null());
     }
 }

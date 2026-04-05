@@ -7,13 +7,13 @@
 /// If the variable is not set, startup fails with a descriptive error.
 ///
 /// ```yaml
-/// admin_token: "${ARBIT_ADMIN_TOKEN}"
+/// admin_token: "${ARBITUS_ADMIN_TOKEN}"
 /// agents:
 ///   cursor:
 ///     api_key: "${CURSOR_API_KEY}"
 /// ```
 ///
-/// # Top-level overrides (`ARBIT_` prefix) — Issue #21
+/// # Top-level overrides (`ARBITUS_` prefix) — Issue #21
 ///
 /// A small set of high-value fields can be overridden via dedicated env vars
 /// without touching the YAML file.  This follows the 12-factor app convention
@@ -22,9 +22,9 @@
 ///
 /// | Env var              | Config field          |
 /// |----------------------|-----------------------|
-/// | `ARBIT_ADMIN_TOKEN`  | `admin_token`         |
-/// | `ARBIT_UPSTREAM_URL` | `transport.upstream`  |
-/// | `ARBIT_LISTEN_ADDR`  | `transport.addr`      |
+/// | `ARBITUS_ADMIN_TOKEN`  | `admin_token`         |
+/// | `ARBITUS_UPSTREAM_URL` | `transport.upstream`  |
+/// | `ARBITUS_LISTEN_ADDR`  | `transport.addr`      |
 use crate::config::Config;
 
 /// Replace every `${VAR_NAME}` placeholder in `raw` with the value of the
@@ -57,20 +57,20 @@ pub fn interpolate_env_vars(raw: &str) -> anyhow::Result<String> {
     Ok(result)
 }
 
-/// Apply `ARBIT_*` env var overrides to a parsed `Config`.
+/// Apply `ARBITUS_*` env var overrides to a parsed `Config`.
 ///
 /// Each recognised variable silently overrides the corresponding field when set.
 /// Unset variables are ignored — the YAML value is kept.
 pub fn apply_env_overrides(config: &mut Config) {
-    if let Ok(token) = std::env::var("ARBIT_ADMIN_TOKEN") {
+    if let Ok(token) = std::env::var("ARBITUS_ADMIN_TOKEN") {
         config.admin_token = Some(token);
     }
 
-    if let Ok(url) = std::env::var("ARBIT_UPSTREAM_URL") {
+    if let Ok(url) = std::env::var("ARBITUS_UPSTREAM_URL") {
         config.set_upstream_url(url);
     }
 
-    if let Ok(addr) = std::env::var("ARBIT_LISTEN_ADDR") {
+    if let Ok(addr) = std::env::var("ARBITUS_LISTEN_ADDR") {
         config.set_listen_addr(addr);
     }
 }
@@ -84,25 +84,25 @@ mod tests {
     #[test]
     fn resolves_single_placeholder() {
         // SAFETY: single-threaded test binary; no other thread reads this var concurrently.
-        unsafe { std::env::set_var("_ARBIT_TEST_TOKEN", "supersecret") };
-        let raw = "admin_token: \"${_ARBIT_TEST_TOKEN}\"";
+        unsafe { std::env::set_var("_ARBITUS_TEST_TOKEN", "supersecret") };
+        let raw = "admin_token: \"${_ARBITUS_TEST_TOKEN}\"";
         let out = interpolate_env_vars(raw).unwrap();
         assert_eq!(out, "admin_token: \"supersecret\"");
-        unsafe { std::env::remove_var("_ARBIT_TEST_TOKEN") };
+        unsafe { std::env::remove_var("_ARBITUS_TEST_TOKEN") };
     }
 
     #[test]
     fn resolves_multiple_placeholders() {
         unsafe {
-            std::env::set_var("_ARBIT_A", "val_a");
-            std::env::set_var("_ARBIT_B", "val_b");
+            std::env::set_var("_ARBITUS_A", "val_a");
+            std::env::set_var("_ARBITUS_B", "val_b");
         }
-        let raw = "x: \"${_ARBIT_A}\"\ny: \"${_ARBIT_B}\"";
+        let raw = "x: \"${_ARBITUS_A}\"\ny: \"${_ARBITUS_B}\"";
         let out = interpolate_env_vars(raw).unwrap();
         assert_eq!(out, "x: \"val_a\"\ny: \"val_b\"");
         unsafe {
-            std::env::remove_var("_ARBIT_A");
-            std::env::remove_var("_ARBIT_B");
+            std::env::remove_var("_ARBITUS_A");
+            std::env::remove_var("_ARBITUS_B");
         }
     }
 
@@ -115,11 +115,11 @@ mod tests {
 
     #[test]
     fn error_on_unset_variable() {
-        unsafe { std::env::remove_var("_ARBIT_DEFINITELY_NOT_SET") };
-        let raw = "admin_token: \"${_ARBIT_DEFINITELY_NOT_SET}\"";
+        unsafe { std::env::remove_var("_ARBITUS_DEFINITELY_NOT_SET") };
+        let raw = "admin_token: \"${_ARBITUS_DEFINITELY_NOT_SET}\"";
         let err = interpolate_env_vars(raw).unwrap_err();
         assert!(
-            err.to_string().contains("_ARBIT_DEFINITELY_NOT_SET"),
+            err.to_string().contains("_ARBITUS_DEFINITELY_NOT_SET"),
             "error should name the missing variable"
         );
         assert!(
@@ -146,9 +146,9 @@ mod tests {
     fn partial_placeholder_not_consumed() {
         // "${VAR" without closing brace — take_while exhausts the string, var_name = "VAR"
         // and std::env::var("VAR") is unset → error
-        unsafe { std::env::remove_var("_ARBIT_UNCLOSED") };
-        let raw = "${_ARBIT_UNCLOSED";
+        unsafe { std::env::remove_var("_ARBITUS_UNCLOSED") };
+        let raw = "${_ARBITUS_UNCLOSED";
         let err = interpolate_env_vars(raw).unwrap_err();
-        assert!(err.to_string().contains("_ARBIT_UNCLOSED"));
+        assert!(err.to_string().contains("_ARBITUS_UNCLOSED"));
     }
 }

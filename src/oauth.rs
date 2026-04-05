@@ -1,10 +1,10 @@
-/// OAuth 2.1 + PKCE client for authenticating arbit to upstream MCP servers.
+/// OAuth 2.1 + PKCE client for authenticating arbitus to upstream MCP servers.
 ///
 /// # Flow
 ///
-/// 1. For each named upstream with an `oauth:` block, arbit calls
+/// 1. For each named upstream with an `oauth:` block, arbitus calls
 ///    [`OAuthManager::authorization_url`] at startup and logs the URL.
-/// 2. The operator visits the URL in a browser, authorizes arbit, and the
+/// 2. The operator visits the URL in a browser, authorizes arbitus, and the
 ///    provider redirects to `GET /oauth/callback?code=…&state=…`.
 /// 3. The callback handler calls [`OAuthManager::exchange_code`], which
 ///    exchanges the authorization code + PKCE verifier for tokens.
@@ -108,7 +108,7 @@ impl OAuthManager {
     ///
     /// The generated `state` is stored internally and must be presented back
     /// by the callback via [`exchange_code`].  The URL must be visited by the
-    /// operator in a browser to authorize arbit.
+    /// operator in a browser to authorize arbitus.
     pub fn authorization_url(&self, upstream_name: &str, config: &OAuthClientConfig) -> String {
         let pkce = PkceChallenge::new();
         let state = Uuid::new_v4().to_string();

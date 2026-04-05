@@ -1,15 +1,15 @@
 [package]
-name = "arbit"
+name = "arbitus"
 version = "0.18.0"
 edition = "2024"
 description = "Security proxy for MCP (Model Context Protocol) — auth, rate limiting, payload filtering, and audit logging between AI agents and MCP servers"
-repository = "https://github.com/nfvelten/arbit"
+repository = "https://github.com/nfvelten/arbitus"
 license = "MIT"
 keywords = ["mcp", "proxy", "security", "ai", "gateway"]
 categories = ["network-programming", "authentication"]
 
 [lib]
-name = "arbit"
+name = "arbitus"
 path = "src/lib.rs"
 
 [[bin]]
@@ -17,8 +17,8 @@ name = "dummy-server"
 path = "src/bin/dummy_server.rs"
 
 [[bin]]
-name = "arbit"
-path = "src/bin/arbit.rs"
+name = "arbitus"
+path = "src/bin/arbitus.rs"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }

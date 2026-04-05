@@ -176,7 +176,7 @@ pub enum AuditConfig {
         #[serde(default)]
         cloudevents: bool,
         /// CloudEvents `source` attribute — identifies this gateway instance.
-        /// Should be a URI-reference. Defaults to `/arbit`.
+        /// Should be a URI-reference. Defaults to `/arbitus`.
         #[serde(default = "default_ce_source")]
         source: String,
     },
@@ -186,18 +186,18 @@ pub enum AuditConfig {
         /// Optional Bearer token sent in the Authorization header.
         token: Option<String>,
         /// OpenLineage `job.namespace` — identifies this gateway instance.
-        /// Defaults to `"arbit"`.
+        /// Defaults to `"arbitus"`.
         #[serde(default = "default_ol_namespace")]
         namespace: String,
     },
 }
 
 fn default_ce_source() -> String {
-    "/arbit".to_string()
+    "/arbitus".to_string()
 }
 
 fn default_ol_namespace() -> String {
-    "arbit".to_string()
+    "arbitus".to_string()
 }
 
 fn default_db_path() -> String {
@@ -351,9 +351,9 @@ pub struct UpstreamFull {
 
 /// OAuth 2.1 + PKCE client configuration for an upstream MCP server.
 ///
-/// When present, arbit will obtain and manage access tokens for this upstream
+/// When present, arbitus will obtain and manage access tokens for this upstream
 /// automatically. On first start (or after token expiry), the authorization URL
-/// is logged — the operator must visit it once to authorize arbit.
+/// is logged — the operator must visit it once to authorize arbitus.
 #[derive(Debug, Clone, Deserialize)]
 pub struct OAuthClientConfig {
     /// OAuth client ID registered with the authorization server.
@@ -523,13 +523,13 @@ fn default_agent_claim() -> String {
 pub struct TelemetryConfig {
     /// OTLP gRPC endpoint (e.g. `http://localhost:4317`).
     pub otlp_endpoint: String,
-    /// `service.name` resource attribute. Defaults to `"arbit"`.
+    /// `service.name` resource attribute. Defaults to `"arbitus"`.
     #[serde(default = "default_service_name")]
     pub service_name: String,
 }
 
 fn default_service_name() -> String {
-    "arbit".to_string()
+    "arbitus".to_string()
 }
 
 // ── Rules ─────────────────────────────────────────────────────────────────────
