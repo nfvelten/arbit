@@ -1,8 +1,8 @@
-# arbit
+# Arbitus
 
-[![crates.io](https://img.shields.io/crates/v/arbit.svg)](https://crates.io/crates/arbit)
+[![crates.io](https://img.shields.io/crates/v/arbitus.svg)](https://crates.io/crates/arbitus)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![CI](https://github.com/nfvelten/arbit/actions/workflows/ci.yml/badge.svg)](https://github.com/nfvelten/arbit/actions/workflows/ci.yml)
+[![CI](https://github.com/nfvelten/arbitus/actions/workflows/ci.yml/badge.svg)](https://github.com/nfvelten/arbitus/actions/workflows/ci.yml)
 
 A security proxy that sits between AI agents and MCP servers. It enforces per-agent policies before any tool call reaches the upstream server.
 
@@ -10,7 +10,7 @@ A security proxy that sits between AI agents and MCP servers. It enforces per-ag
 Agent (Cursor, Claude, etc.)
         │  JSON-RPC
         ▼
-      arbit       ← auth, rate limit, HITL, payload filter, audit
+      arbitus     ← auth, rate limit, HITL, payload filter, audit
         │
         ▼
   MCP Server (filesystem, database, APIs...)
@@ -42,7 +42,7 @@ Agent (Cursor, Claude, etc.)
 - **Dashboard** — `/dashboard` audit viewer with per-agent filtering
 - **TLS / mTLS** — optional HTTPS with mutual TLS agent authentication
 - **Transport agnostic** — HTTP+SSE or stdio; same config, same policies
-- **Secrets-safe config** — `${VAR}` interpolation in YAML + `ARBIT_*` env var overrides; compatible with K8s Secrets, Vault, External Secrets Operator
+- **Secrets-safe config** — `${VAR}` interpolation in YAML + `ARBITUS_*` env var overrides; compatible with K8s Secrets, Vault, External Secrets Operator
 - **Container-ready** — multi-arch Docker image, Helm chart with sidecar pattern, graceful shutdown
 
 ## Documentation
@@ -61,32 +61,32 @@ Agent (Cursor, Claude, etc.)
 ### Install
 
 ```sh
-cargo install arbit
+cargo install arbitus
 ```
 
-Or download a pre-built binary from the [releases page](https://github.com/nfvelten/arbit/releases):
+Or download a pre-built binary from the [releases page](https://github.com/nfvelten/arbitus/releases):
 
 | Platform | Archive |
 |---|---|
-| Linux x64 (static) | `arbit-vX.Y.Z-x86_64-unknown-linux-musl.tar.gz` |
-| Linux ARM64 (static) | `arbit-vX.Y.Z-aarch64-unknown-linux-musl.tar.gz` |
-| macOS x64 | `arbit-vX.Y.Z-x86_64-apple-darwin.tar.gz` |
-| macOS Apple Silicon | `arbit-vX.Y.Z-aarch64-apple-darwin.tar.gz` |
-| Windows x64 | `arbit-vX.Y.Z-x86_64-pc-windows-msvc.zip` |
+| Linux x64 (static) | `arbitus-vX.Y.Z-x86_64-unknown-linux-musl.tar.gz` |
+| Linux ARM64 (static) | `arbitus-vX.Y.Z-aarch64-unknown-linux-musl.tar.gz` |
+| macOS x64 | `arbitus-vX.Y.Z-x86_64-apple-darwin.tar.gz` |
+| macOS Apple Silicon | `arbitus-vX.Y.Z-aarch64-apple-darwin.tar.gz` |
+| Windows x64 | `arbitus-vX.Y.Z-x86_64-pc-windows-msvc.zip` |
 
 Or build from source:
 
 ```sh
-git clone https://github.com/nfvelten/arbit
-cd arbit
+git clone https://github.com/nfvelten/arbitus
+cd arbitus
 cargo build --release
 ```
 
 Or use Docker:
 
 ```sh
-docker pull ghcr.io/nfvelten/arbit:latest
-docker run --rm -p 4000:4000 -v $(pwd)/gateway.yml:/app/gateway.yml ghcr.io/nfvelten/arbit:latest
+docker pull ghcr.io/nfvelten/arbitus:latest
+docker run --rm -p 4000:4000 -v $(pwd)/gateway.yml:/app/gateway.yml ghcr.io/nfvelten/arbitus:latest
 ```
 
 ### Configure
@@ -117,7 +117,7 @@ rules:
 ### Run
 
 ```sh
-./arbit gateway.yml
+./arbitus gateway.yml
 ```
 
 Agents connect to `http://localhost:4000/mcp`. The gateway enforces policies and forwards allowed requests to the upstream MCP server.
@@ -125,20 +125,20 @@ Agents connect to `http://localhost:4000/mcp`. The gateway enforces policies and
 ### Validate config
 
 ```sh
-./arbit validate gateway.yml
+./arbitus validate gateway.yml
 ```
 
 ### Query audit log
 
 ```sh
-./arbit audit gateway-audit.db --agent cursor --outcome blocked --since 1h
+./arbitus audit gateway-audit.db --agent cursor --outcome blocked --since 1h
 ```
 
 ## Architecture
 
 ```
             ┌──────────────────────────────────────────┐
-            │                  Arbit                   │
+            │                 Arbitus                  │
             │                                          │
   request ──► Pipeline                                 │
             │   1. RateLimitMiddleware                 │

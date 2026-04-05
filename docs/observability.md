@@ -11,24 +11,24 @@ curl http://localhost:4000/metrics -H "Authorization: Bearer admin-secret"
 ```
 
 ```
-# HELP arbit_requests_total Total requests processed by the gateway
-# TYPE arbit_requests_total counter
-arbit_requests_total{agent="cursor",outcome="allowed"} 12
-arbit_requests_total{agent="cursor",outcome="blocked"} 3
-arbit_requests_total{agent="cursor",outcome="shadowed"} 2
-arbit_requests_total{agent="claude-code",outcome="forwarded"} 8
+# HELP arbitus_requests_total Total requests processed by the gateway
+# TYPE arbitus_requests_total counter
+arbitus_requests_total{agent="cursor",outcome="allowed"} 12
+arbitus_requests_total{agent="cursor",outcome="blocked"} 3
+arbitus_requests_total{agent="cursor",outcome="shadowed"} 2
+arbitus_requests_total{agent="claude-code",outcome="forwarded"} 8
 
-# HELP arbit_tokens_total Estimated token count processed by arbit (4-chars-per-token heuristic)
-# TYPE arbit_tokens_total counter
-arbit_tokens_total{agent="cursor",direction="input"} 1420
-arbit_tokens_total{agent="cursor",direction="output"} 3870
-arbit_tokens_total{agent="claude-code",direction="input"} 520
-arbit_tokens_total{agent="claude-code",direction="output"} 1340
+# HELP arbitus_tokens_total Estimated token count processed by arbitus (4-chars-per-token heuristic)
+# TYPE arbitus_tokens_total counter
+arbitus_tokens_total{agent="cursor",direction="input"} 1420
+arbitus_tokens_total{agent="cursor",direction="output"} 3870
+arbitus_tokens_total{agent="claude-code",direction="input"} 520
+arbitus_tokens_total{agent="claude-code",direction="output"} 1340
 ```
 
 ### Cost observability
 
-Use `arbit_tokens_total` for per-agent chargeback dashboards in Grafana or Datadog. The `input` direction tracks tokens sent to upstream MCP servers; `output` tracks tokens returned in responses. Both use the 4-chars-per-token heuristic — actual billing by model providers may differ. `input_tokens` is also stored in the SQLite audit log per request.
+Use `arbitus_tokens_total` for per-agent chargeback dashboards in Grafana or Datadog. The `input` direction tracks tokens sent to upstream MCP servers; `output` tracks tokens returned in responses. Both use the 4-chars-per-token heuristic — actual billing by model providers may differ. `input_tokens` is also stored in the SQLite audit log per request.
 
 ## Health check
 
@@ -71,10 +71,10 @@ curl "http://localhost:4000/dashboard?agent=cursor"
 Agent policies and block patterns reload from disk every 30 seconds automatically, or immediately on `SIGUSR1`:
 
 ```sh
-kill -USR1 $(pidof arbit)
+kill -USR1 $(pidof arbitus)
 ```
 
-No restart required. In-flight requests are not affected. Failed reloads keep the previous config active and increment `arbit_config_reload_failures_total`.
+No restart required. In-flight requests are not affected. Failed reloads keep the previous config active and increment `arbitus_config_reload_failures_total`.
 
 ## OpenTelemetry
 
@@ -83,7 +83,7 @@ Export traces to any OTLP-compatible backend (Jaeger, Grafana Tempo, Honeycomb, 
 ```yaml
 telemetry:
   otlp_endpoint: "http://localhost:4317"   # gRPC OTLP
-  service_name: "arbit"               # optional, default: "arbit"
+  service_name: "arbitus"               # optional, default: "arbitus"
 ```
 
 Every `tools/call` creates a span with `agent_id`, `method`, and `tool` attributes. Spans are exported in batches; any buffered spans are flushed on shutdown.
@@ -91,7 +91,7 @@ Every `tools/call` creates a span with `agent_id`, `method`, and `tool` attribut
 ```sh
 # Quick local test with Jaeger all-in-one
 docker run -p 4317:4317 -p 16686:16686 jaegertracing/all-in-one
-LOG_LEVEL=debug ./arbit gateway.yml
+LOG_LEVEL=debug ./arbitus gateway.yml
 open http://localhost:16686
 ```
 
@@ -101,10 +101,10 @@ Control log format and level via environment variables:
 
 ```sh
 # Structured JSON (production / log aggregators)
-LOG_FORMAT=json ./arbit gateway.yml
+LOG_FORMAT=json ./arbitus gateway.yml
 
 # Adjust log level (default: info)
-LOG_LEVEL=debug ./arbit gateway.yml
+LOG_LEVEL=debug ./arbitus gateway.yml
 ```
 
 ## Circuit breaker

@@ -75,7 +75,7 @@ Credentials should never be stored in plaintext. Two mechanisms are available:
 Reference any environment variable inside `gateway.yml`:
 
 ```yaml
-admin_token: "${ARBIT_ADMIN_TOKEN}"
+admin_token: "${ARBITUS_ADMIN_TOKEN}"
 
 agents:
   cursor:
@@ -86,21 +86,21 @@ auth:
     secret: "${JWT_SECRET}"
 ```
 
-If the variable is not set, arbit aborts at startup:
+If the variable is not set, arbitus aborts at startup:
 
 ```
-config error: env var 'ARBIT_ADMIN_TOKEN' is not set (referenced in gateway.yml)
+config error: env var 'ARBITUS_ADMIN_TOKEN' is not set (referenced in gateway.yml)
 ```
 
-### `ARBIT_*` env var overrides
+### `ARBITUS_*` env var overrides
 
 Override specific fields without modifying the YAML file — useful when deploying a shared base config with environment-specific secrets:
 
 | Env var | Overrides |
 |---------|-----------|
-| `ARBIT_ADMIN_TOKEN` | `admin_token` |
-| `ARBIT_UPSTREAM_URL` | `transport.upstream` |
-| `ARBIT_LISTEN_ADDR` | `transport.addr` |
+| `ARBITUS_ADMIN_TOKEN` | `admin_token` |
+| `ARBITUS_UPSTREAM_URL` | `transport.upstream` |
+| `ARBITUS_LISTEN_ADDR` | `transport.addr` |
 
 These work with any secret manager that exposes secrets as env vars: Kubernetes Secrets (`envFrom`), Vault Agent, External Secrets Operator, OpenBao, Infisical, etc.
 
@@ -109,7 +109,7 @@ These work with any secret manager that exposes secrets as env vars: Kubernetes 
 Optional top-level field. When set, `/metrics` and `/dashboard` require an `Authorization: Bearer <token>` header. Without the header the endpoints return `403`.
 
 ```yaml
-admin_token: "${ARBIT_ADMIN_TOKEN}"   # recommended: inject via env var
+admin_token: "${ARBITUS_ADMIN_TOKEN}"   # recommended: inject via env var
 ```
 
 ## `auth` (JWT / OIDC / OAuth 2.1)
@@ -123,13 +123,13 @@ Accepts a single provider or a list — the first to successfully validate the t
 auth:
   secret: "your-signing-secret"
   issuer: "https://auth.example.com"   # optional — validated if set
-  audience: "arbit"               # optional — validated if set
+  audience: "arbitus"               # optional — validated if set
 
 # JWKS (RS256 / OIDC) — explicit endpoint
 auth:
   jwks_url: "https://auth.example.com/.well-known/jwks.json"
   issuer: "https://auth.example.com"
-  audience: "arbit"
+  audience: "arbitus"
 
 # Provider presets — OIDC discovery URL resolved automatically
 auth:
@@ -275,7 +275,7 @@ The policy input object contains: `agent_id`, `method`, `tool_name`, `arguments`
 Validate a config file without starting the gateway:
 
 ```sh
-./arbit validate gateway.yml
+./arbitus validate gateway.yml
 ```
 
 Checks performed: regex syntax in `block_patterns`, upstream name references, TLS file paths, circuit breaker threshold, and tool name format.

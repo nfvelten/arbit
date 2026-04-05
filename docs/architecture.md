@@ -2,7 +2,7 @@
 
 ```
             ┌──────────────────────────────────────────┐
-            │                  Arbit                   │
+            │                 Arbitus                  │
             │                                          │
   request ──► Pipeline                                 │
             │   1. RateLimitMiddleware                 │

@@ -4,14 +4,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**arbit** is a security proxy (gateway) that sits between AI agents (Cursor, Claude, etc.) and MCP (Model Context Protocol) servers. It enforces per-agent policies — authentication, rate limiting, payload filtering, schema validation, and audit logging — before any tool call reaches the upstream MCP server.
+**arbitus** is a security proxy (gateway) that sits between AI agents (Cursor, Claude, etc.) and MCP (Model Context Protocol) servers. It enforces per-agent policies — authentication, rate limiting, payload filtering, schema validation, and audit logging — before any tool call reaches the upstream MCP server.
 
 ## Commands
 
 ### Build
 ```bash
 cargo build            # Debug
-cargo build --release  # Release (binaries: arbit, arbit-audit, dummy-server)
+cargo build --release  # Release (binaries: arbitus, arbitus-audit, dummy-server)
 ```
 
 ### Test
@@ -34,7 +34,7 @@ cargo clippy -- -D warnings    # Lint (CI fails on any warning)
 ```
 Agent (Cursor, Claude, etc.)
        ↓ JSON-RPC
-  arbit (this gateway)
+  arbitus (this gateway)
        ↓ Middleware pipeline:
          1. RateLimitMiddleware    — sliding-window per-agent/tool/IP
          2. AuthMiddleware         — tool allowlist/denylist (supports wildcards)
@@ -56,7 +56,7 @@ Agent (Cursor, Claude, etc.)
 - **`src/upstream/`** — `McpUpstream` trait; `http.rs` = reqwest client with circuit breaker
 - **`src/audit/`** — `AuditLog` trait with SQLite, stdout, webhook backends; `fanout.rs` fans out to multiple
 - **`src/jwt.rs`** — JWT/OIDC validation (HS256, RS256, JWKS, multi-provider)
-- **`src/bin/gateway.rs`** — Main binary entrypoint
+- **`src/bin/arbitus.rs`** — Main binary entrypoint
 - **`src/bin/audit.rs`** — CLI to query SQLite audit log
 - **`src/bin/dummy_server.rs`** — Minimal MCP server used in integration tests
 
@@ -117,13 +117,13 @@ audits:                    # Fan-out to multiple backends
 
 ```bash
 # Start gateway
-./target/release/arbit gateway.yml
+./target/release/arbitus gateway.yml
 
 # Query audit log
-./target/release/arbit-audit gateway-audit.db --agent cursor --outcome blocked --since 1h
+./target/release/arbitus-audit gateway-audit.db --agent cursor --outcome blocked --since 1h
 
 # Hot-reload config
-kill -USR1 $(pidof arbit)
+kill -USR1 $(pidof arbitus)
 ```
 
 Endpoints: `/health`, `/metrics` (Prometheus), `/dashboard` (audit UI). The admin endpoints require `Authorization: Bearer <admin_token>`.

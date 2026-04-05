@@ -5,9 +5,9 @@
 Start the gateway:
 
 ```sh
-./arbit gateway.yml
+./arbitus gateway.yml
 # or explicitly:
-./arbit start gateway.yml
+./arbitus start gateway.yml
 ```
 
 Agents connect to `http://localhost:4000/mcp`. The gateway forwards allowed requests to the upstream MCP server.
@@ -160,7 +160,7 @@ data: /mcp
 
 ## OpenAI Tools Bridge
 
-`GET /openai/v1/tools` and `POST /openai/v1/execute` let OpenAI function-calling clients use arbit without refactoring. All requests still pass through the full security pipeline (auth, rate limiting, payload filtering, audit).
+`GET /openai/v1/tools` and `POST /openai/v1/execute` let OpenAI function-calling clients use arbitus without refactoring. All requests still pass through the full security pipeline (auth, rate limiting, payload filtering, audit).
 
 ## Tool Federation
 

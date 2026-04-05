@@ -1,4 +1,4 @@
-# Contributing to arbit
+# Contributing to arbitus
 
 Contributions are welcome — bug fixes, new features, tests, and documentation.
 
@@ -10,8 +10,8 @@ For anything beyond a small fix, open an issue first to discuss the approach. Th
 
 ```bash
 # Prerequisites: Rust stable (1.85+)
-git clone https://github.com/nfvelten/arbit
-cd arbit
+git clone https://github.com/nfvelten/arbitus
+cd arbitus
 cargo build
 ```
 
@@ -48,8 +48,8 @@ cargo test --lib         # all unit tests green
 ```
 src/
   bin/
-    arbit.rs             # Main binary — wires config, pipeline, transport
-    audit.rs             # arbit audit/verify-log CLI
+    arbitus.rs            # Main binary — wires config, pipeline, transport
+    audit.rs             # arbitus audit/verify-log CLI
     dummy_server.rs      # Minimal MCP server used in integration tests
   audit/                 # AuditLog trait + backends (sqlite, stdout, webhook, openlineage, fanout)
   middleware/            # Trait-based pipeline (auth, rate_limit, payload_filter, schema, hitl, opa)

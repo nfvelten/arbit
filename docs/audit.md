@@ -1,6 +1,6 @@
 # Audit
 
-Every request is recorded with a unique `X-Request-Id`. Audit backends use bounded channels (4096 entries) with `arbit_audit_drops_total` Prometheus counter for backpressure alerting.
+Every request is recorded with a unique `X-Request-Id`. Audit backends use bounded channels (4096 entries) with `arbitus_audit_drops_total` Prometheus counter for backpressure alerting.
 
 ## Backends
 
@@ -60,7 +60,7 @@ audit:
   url: "https://hooks.splunk.example.com/mcp"
   token: "splunk-hec-token"
   cloudevents: true
-  source: "https://gateway.prod.example.com"  # optional, default: /arbit
+   source: "https://gateway.prod.example.com"  # optional, default: /arbitus
 ```
 
 CloudEvents envelope:
@@ -68,7 +68,7 @@ CloudEvents envelope:
 ```json
 {
   "specversion": "1.0",
-  "type": "dev.arbit.audit.blocked",
+  "type": "dev.arbitus.audit.blocked",
   "source": "https://gateway.prod.example.com",
   "id": "req-abc-123",
   "time": "2026-03-31T00:54:00Z",
@@ -83,7 +83,7 @@ CloudEvents envelope:
 }
 ```
 
-Event types follow the reverse-DNS convention: `dev.arbit.audit.<outcome>` where outcome is `allowed`, `blocked`, `forwarded`, or `shadowed`.
+Event types follow the reverse-DNS convention: `dev.arbitus.audit.<outcome>` where outcome is `allowed`, `blocked`, `forwarded`, or `shadowed`.
 
 ## OpenLineage
 
@@ -94,7 +94,7 @@ audit:
   type: openlineage
   url: "https://api.openlineage.io/api/v1/lineage"
   token: "my-api-key"   # optional — sent as Bearer token
-  namespace: "arbit"    # optional — OpenLineage job.namespace, default: "arbit"
+   namespace: "arbitus"    # optional — OpenLineage job.namespace, default: "arbitus"
 ```
 
 Or fan-out alongside other backends:
@@ -117,14 +117,14 @@ Payload sent per `tools/call`:
   "run": {
     "runId": "550e8400-e29b-41d4-a716-446655440000",
     "facets": {
-      "arbit:execution": { "outcome": "allowed", "agent": "cursor", "input_tokens": 12 },
-      "arbit:arguments": { "arguments": { "path": "/etc/hosts" } }
+      "arbitus:execution": { "outcome": "allowed", "agent": "cursor", "input_tokens": 12 },
+      "arbitus:arguments": { "arguments": { "path": "/etc/hosts" } }
     }
   },
-  "job": { "namespace": "arbit", "name": "cursor/read_file", "facets": {} },
+  "job": { "namespace": "arbitus", "name": "cursor/read_file", "facets": {} },
   "inputs": [{ "namespace": "cursor", "name": "read_file" }],
   "outputs": [],
-  "producer": "https://github.com/nfvelten/arbit",
+  "producer": "https://github.com/nfvelten/arbitus",
   "schemaURL": "https://openlineage.io/spec/2-0-2/OpenLineage.json#/definitions/RunEvent"
 }
 ```
@@ -137,16 +137,16 @@ Query the audit log without opening SQLite directly:
 
 ```sh
 # Last 50 entries
-./arbit audit gateway-audit.db
+./arbitus audit gateway-audit.db
 
 # Only blocked requests in the last hour
-./arbit audit gateway-audit.db --outcome blocked --since 1h
+./arbitus audit gateway-audit.db --outcome blocked --since 1h
 
 # All activity from a specific agent
-./arbit audit gateway-audit.db --agent cursor
+./arbitus audit gateway-audit.db --agent cursor
 
 # Increase the row limit
-./arbit audit gateway-audit.db --limit 200
+./arbitus audit gateway-audit.db --limit 200
 ```
 
 Output:
