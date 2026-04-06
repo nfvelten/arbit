@@ -136,9 +136,9 @@ chmod +x tests/mock-server.sh
 # 2. Cleanup
 cleanup() {
     echo -e "\n${YELLOW}🧹 Cleaning up processes and temp files...${NC}"
-    kill $DUMMY_PID $ARBITUS_PID $NODE_PID 2>/dev/null || true
-    fuser -k 3000/tcp 4001/tcp 5000/tcp 2>/dev/null || true
-    rm -rf concurrent_results/ tests/mock-server.sh output-stdio.jsonl tests/fixtures/gateway-hotreload.yml tests/fixtures/gateway-e2e-ip.yml *.log hitl_resp.txt webhook.log tests/node_helper.js tests/policy.rego tests/fixtures/gateway-verify.yml
+    kill $DUMMY_PID $ARBITUS_PID $NODE_PID $STREAMABLE_PID 2>/dev/null || true
+    fuser -k 3000/tcp 4001/tcp 4002/tcp 5000/tcp 2>/dev/null || true
+    rm -rf concurrent_results/ tests/mock-server.sh output-stdio.jsonl tests/fixtures/gateway-hotreload.yml tests/fixtures/gateway-e2e-ip.yml tests/fixtures/gateway-e2e-streamable.yml *.log hitl_resp.txt webhook.log tests/node_helper.js tests/policy.rego tests/fixtures/gateway-verify.yml
 }
 trap cleanup EXIT
 
@@ -378,10 +378,96 @@ echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"clientInfo":{"nam
 if ! grep -q "ok" output-stdio.jsonl; then pass "tampered binary blocked correctly"
 else fail "binary verification — tampered binary was NOT blocked"; fi
 
+echo -e "\n${CYAN}🔀 20. STREAMABLE HTTP TRANSPORT (MCP 2025-03-26)${NC}"
+echo "   Starting gateway with streamable_http transport on port 4002..."
+
+cat << 'EOF' > tests/fixtures/gateway-e2e-streamable.yml
+transport:
+  type: streamable_http
+  addr: "127.0.0.1:4002"
+  upstream: "http://127.0.0.1:3000/mcp"
+agents:
+  cursor:
+    allowed_tools: ["echo"]
+    rate_limit: 100
+  claude-code:
+    denied_tools: ["delete_database"]
+    rate_limit: 100
+EOF
+
+./target/debug/arbitus tests/fixtures/gateway-e2e-streamable.yml >> arbitus.log 2>&1 &
+STREAMABLE_PID=$!
+sleep 2
+
+# initialize → must return application/json even when Accept: text/event-stream is sent
+echo "   Testing initialize always returns application/json..."
+INIT_RESP=$(curl -s -i -X POST http://127.0.0.1:4002/mcp \
+  -H "Content-Type: application/json" \
+  -H "Accept: text/event-stream" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"cursor","version":"1.0"}}}')
+SESSION_ID=$(echo "$INIT_RESP" | grep -i "mcp-session-id:" | awk '{print $2}' | tr -d '\r')
+CT=$(echo "$INIT_RESP" | grep -i "content-type:" | head -1)
+if echo "$CT" | grep -q "application/json"; then pass "initialize returns application/json (not SSE)"
+else fail "initialize content-type wrong: $CT"; fi
+if [[ -n "$SESSION_ID" ]]; then pass "initialize assigns Mcp-Session-Id: $SESSION_ID"
+else fail "initialize — no mcp-session-id header in response"; fi
+
+# tools/list without SSE Accept → JSON
+echo "   Testing tools/list returns JSON when Accept is not text/event-stream..."
+LIST_JSON=$(curl -s -i -X POST http://127.0.0.1:4002/mcp \
+  -H "Content-Type: application/json" \
+  -H "mcp-session-id: $SESSION_ID" \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/list"}')
+CT=$(echo "$LIST_JSON" | grep -i "content-type:" | head -1)
+if echo "$CT" | grep -q "application/json"; then pass "tools/list returns JSON by default"
+else fail "tools/list JSON mode — content-type wrong: $CT"; fi
+
+# tools/list with Accept: text/event-stream → SSE
+echo "   Testing tools/list returns SSE when Accept: text/event-stream..."
+LIST_SSE=$(curl -s -i --max-time 5 -X POST http://127.0.0.1:4002/mcp \
+  -H "Content-Type: application/json" \
+  -H "Accept: text/event-stream" \
+  -H "mcp-session-id: $SESSION_ID" \
+  -d '{"jsonrpc":"2.0","id":3,"method":"tools/list"}')
+CT=$(echo "$LIST_SSE" | grep -i "content-type:" | head -1)
+if echo "$CT" | grep -q "text/event-stream"; then pass "tools/list returns text/event-stream"
+else fail "tools/list SSE mode — content-type wrong: $CT"; fi
+if echo "$LIST_SSE" | grep -q "event: message"; then pass "SSE body contains 'event: message'"
+else fail "SSE body missing 'event: message'"; fi
+if echo "$LIST_SSE" | grep -q '"tools"'; then pass "SSE data payload contains tools list"
+else fail "SSE data missing tools array"; fi
+
+# tools/call via SSE → response wrapped as SSE message event
+echo "   Testing tools/call response is wrapped as SSE message event..."
+CALL_SSE=$(curl -s -i --max-time 5 -X POST http://127.0.0.1:4002/mcp \
+  -H "Content-Type: application/json" \
+  -H "Accept: text/event-stream" \
+  -H "mcp-session-id: $SESSION_ID" \
+  -d '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"echo","arguments":{"text":"streamable-e2e"}}}')
+if echo "$CALL_SSE" | grep -q "echo: streamable-e2e"; then pass "tools/call SSE response contains echo result"
+else fail "tools/call SSE — echo result missing"; fi
+
+# DELETE /mcp → 204
+echo "   Testing DELETE /mcp terminates session..."
+DEL_STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X DELETE http://127.0.0.1:4002/mcp \
+  -H "mcp-session-id: $SESSION_ID")
+if [[ "$DEL_STATUS" == "204" ]]; then pass "DELETE /mcp returns 204 No Content"
+else fail "DELETE /mcp returned $DEL_STATUS (expected 204)"; fi
+
+# Subsequent request with invalidated session → 404
+AFTER_DEL=$(curl -s -o /dev/null -w "%{http_code}" -X POST http://127.0.0.1:4002/mcp \
+  -H "Content-Type: application/json" \
+  -H "mcp-session-id: $SESSION_ID" \
+  -d '{"jsonrpc":"2.0","id":5,"method":"tools/list"}')
+if [[ "$AFTER_DEL" == "404" ]]; then pass "invalidated session returns 404"
+else fail "invalidated session returned $AFTER_DEL (expected 404)"; fi
+
+kill $STREAMABLE_PID 2>/dev/null || true
+
 # ── Final summary ──────────────────────────────────────────────────────────────
 echo ""
 if [[ $FAILURES -eq 0 ]]; then
-    echo -e "${MAGENTA}🏆 ALL 19 SECTIONS PASSED${NC}"
+    echo -e "${MAGENTA}🏆 ALL 20 SECTIONS PASSED${NC}"
 else
     echo -e "${RED}✗ $FAILURES ASSERTION(S) FAILED${NC}"
     exit 1
