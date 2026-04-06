@@ -219,6 +219,121 @@ impl Transport for HttpTransport {
     }
 }
 
+// ── Streamable HTTP transport ─────────────────────────────────────────────────
+
+/// MCP Streamable HTTP transport (spec 2025-03-26).
+///
+/// Single endpoint: `POST /mcp` may return either `application/json` or
+/// `text/event-stream` depending on the client's `Accept` header.
+/// `GET /mcp` is available for server-initiated SSE streams.
+/// `DELETE /mcp` terminates a session.
+pub struct StreamableHttpTransport {
+    addr: String,
+    session_ttl_secs: u64,
+    tls: Option<TlsConfig>,
+    metrics: Arc<GatewayMetrics>,
+    config: watch::Receiver<Arc<LiveConfig>>,
+    jwt: Option<Arc<MultiJwtValidator>>,
+    audit_db: Option<String>,
+    admin_token: Option<String>,
+    hitl_store: Arc<HitlStore>,
+    oauth_manager: Arc<OAuthManager>,
+    kill_switch: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+}
+
+impl StreamableHttpTransport {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        addr: impl Into<String>,
+        session_ttl_secs: u64,
+        tls: Option<TlsConfig>,
+        metrics: Arc<GatewayMetrics>,
+        config: watch::Receiver<Arc<LiveConfig>>,
+        jwt: Option<Arc<MultiJwtValidator>>,
+        audit_db: Option<String>,
+        admin_token: Option<String>,
+        hitl_store: Arc<HitlStore>,
+        oauth_manager: Arc<OAuthManager>,
+    ) -> Self {
+        Self {
+            addr: addr.into(),
+            session_ttl_secs,
+            tls,
+            metrics,
+            config,
+            jwt,
+            audit_db,
+            admin_token,
+            hitl_store,
+            oauth_manager,
+            kill_switch: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+        }
+    }
+}
+
+#[async_trait]
+impl Transport for StreamableHttpTransport {
+    async fn serve(&self, gateway: Arc<McpGateway>) -> anyhow::Result<()> {
+        let state = Arc::new(HttpState {
+            gateway,
+            sessions: SessionStore::new(self.session_ttl_secs),
+            metrics: Arc::clone(&self.metrics),
+            config: self.config.clone(),
+            jwt: self.jwt.clone(),
+            audit_db: self.audit_db.clone(),
+            admin_token: self.admin_token.clone(),
+            hitl_store: Arc::clone(&self.hitl_store),
+            oauth_manager: Arc::clone(&self.oauth_manager),
+            kill_switch: Arc::clone(&self.kill_switch),
+        });
+
+        let app = Router::new()
+            .route("/mcp", post(handle_streamable_post))
+            .route("/mcp", get(handle_sse))
+            .route("/mcp", delete(handle_delete_session))
+            .route("/metrics", get(handle_metrics))
+            .route("/health", get(handle_health))
+            .route("/dashboard", get(handle_dashboard))
+            .route("/dashboard/tools/{tool}/block", post(handle_block_tool))
+            .route("/dashboard/tools/{tool}/block", delete(handle_unblock_tool))
+            .route("/dashboard/tools/{tool}/unblock", post(handle_unblock_tool))
+            .route("/approvals", get(handle_list_approvals))
+            .route("/approvals/{id}/approve", post(handle_approve))
+            .route("/approvals/{id}/reject", post(handle_reject))
+            .route("/openai/v1/tools", get(handle_openai_tools))
+            .route("/openai/v1/execute", post(handle_openai_execute))
+            .route("/oauth/callback", get(handle_oauth_callback))
+            .with_state(state);
+
+        if let Some(tls) = &self.tls {
+            let mode = if tls.client_ca.is_some() {
+                "HTTPS+mTLS"
+            } else {
+                "HTTPS"
+            };
+            tracing::info!(addr = %self.addr, "{mode} streamable-HTTP mode listening");
+            serve_tls(
+                app,
+                &self.addr,
+                &tls.cert,
+                &tls.key,
+                tls.client_ca.as_deref(),
+            )
+            .await
+        } else {
+            tracing::info!(addr = %self.addr, "streamable-HTTP mode listening");
+            let listener = tokio::net::TcpListener::bind(&self.addr).await?;
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .with_graceful_shutdown(shutdown_signal())
+            .await?;
+            Ok(())
+        }
+    }
+}
+
 // ── TLS ───────────────────────────────────────────────────────────────────────
 
 async fn serve_tls(
@@ -631,6 +746,245 @@ async fn handle_mcp(
                         insert_rl_headers(&mut res, rl);
                     }
                     res
+                }
+                None => StatusCode::ACCEPTED.into_response(),
+            }
+        }
+        Err(status) => status.into_response(),
+    }
+}
+
+/// Returns `true` when the `Accept` header explicitly includes `text/event-stream`.
+fn accepts_event_stream(headers: &HeaderMap) -> bool {
+    headers
+        .get("accept")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| {
+            v.split(',')
+                .any(|t| t.trim().starts_with("text/event-stream"))
+        })
+        .unwrap_or(false)
+}
+
+/// Wrap a JSON-RPC body as a single SSE `message` event for Streamable HTTP.
+fn json_as_sse_response(body: Value) -> impl IntoResponse {
+    let data = serde_json::to_string(&body).unwrap_or_default();
+    let stream = futures_util::stream::once(async move {
+        Ok::<Event, Infallible>(Event::default().event("message").data(data))
+    });
+    Sse::new(stream).into_response()
+}
+
+/// POST /mcp — MCP Streamable HTTP transport (spec 2025-03-26).
+///
+/// `initialize` requests always return `application/json`.
+/// All other requests return `text/event-stream` when the client sends
+/// `Accept: text/event-stream`; otherwise they return `application/json`.
+async fn handle_streamable_post(
+    State(state): State<Arc<HttpState>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Json(msg): Json<Value>,
+) -> impl IntoResponse {
+    let client_ip = Some(peer.ip().to_string());
+    let method = msg["method"].as_str().unwrap_or("");
+    let use_sse = method != "initialize" && accepts_event_stream(&headers);
+
+    // initialize: resolve agent identity, validate api_key, create session.
+    // Always returns JSON regardless of Accept header.
+    if method == "initialize" {
+        let claimed_name = msg["params"]["clientInfo"]["name"]
+            .as_str()
+            .unwrap_or("unknown");
+
+        if claimed_name.len() > MAX_AGENT_ID_LEN {
+            return StatusCode::BAD_REQUEST.into_response();
+        }
+
+        if let Some(validator) = &state.jwt
+            && let Some(bearer) = headers
+                .get("authorization")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.strip_prefix("Bearer "))
+        {
+            match validator.validate(bearer).await {
+                Ok(agent_name) => {
+                    let session_id = state.sessions.create(agent_name.clone()).await;
+                    tracing::info!(
+                        session_id,
+                        agent = agent_name,
+                        "JWT session created (streamable)"
+                    );
+                    let (response, rl, request_id) =
+                        state.gateway.handle(&agent_name, msg, client_ip).await;
+                    return match response {
+                        Some(body) => {
+                            let mut res = Json(body).into_response();
+                            if let Ok(val) = HeaderValue::from_str(&session_id) {
+                                res.headers_mut().insert("mcp-session-id", val);
+                            }
+                            if let Ok(val) = HeaderValue::from_str(&request_id) {
+                                res.headers_mut().insert("x-request-id", val);
+                            }
+                            if let Some(rl) = &rl {
+                                insert_rl_headers(&mut res, rl);
+                            }
+                            res
+                        }
+                        None => StatusCode::ACCEPTED.into_response(),
+                    };
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "JWT validation failed");
+                    return StatusCode::UNAUTHORIZED.into_response();
+                }
+            }
+        }
+
+        let mtls_agent: Option<Result<String, ()>> = headers
+            .get(MTLS_CN_HEADER)
+            .and_then(|v| v.to_str().ok())
+            .map(|cn| {
+                let cfg = state.config.borrow();
+                match cfg.mtls_identities.get(cn) {
+                    Some(name) => Ok(name.clone()),
+                    None => {
+                        tracing::warn!(cn, "client cert CN not mapped to any agent");
+                        Err(())
+                    }
+                }
+            });
+        if let Some(result) = mtls_agent {
+            match result {
+                Err(()) => return StatusCode::UNAUTHORIZED.into_response(),
+                Ok(agent_name) => {
+                    let session_id = state.sessions.create(agent_name.clone()).await;
+                    tracing::info!(
+                        session_id,
+                        agent = agent_name,
+                        "mTLS session created (streamable)"
+                    );
+                    let (response, rl, request_id) =
+                        state.gateway.handle(&agent_name, msg, client_ip).await;
+                    return match response {
+                        Some(body) => {
+                            let mut res = Json(body).into_response();
+                            if let Ok(val) = HeaderValue::from_str(&session_id) {
+                                res.headers_mut().insert("mcp-session-id", val);
+                            }
+                            if let Ok(val) = HeaderValue::from_str(&request_id) {
+                                res.headers_mut().insert("x-request-id", val);
+                            }
+                            if let Some(rl) = &rl {
+                                insert_rl_headers(&mut res, rl);
+                            }
+                            res
+                        }
+                        None => StatusCode::ACCEPTED.into_response(),
+                    };
+                }
+            }
+        }
+
+        let agent_name = {
+            let cfg = state.config.borrow();
+            if let Some(provided_key) = headers.get("x-api-key").and_then(|v| v.to_str().ok()) {
+                let matched = cfg.api_keys.iter().find(|(stored_key, _)| {
+                    stored_key.as_bytes().ct_eq(provided_key.as_bytes()).into()
+                });
+                match matched {
+                    Some((_, name)) => name.clone(),
+                    None => {
+                        tracing::warn!("unknown api_key");
+                        return StatusCode::UNAUTHORIZED.into_response();
+                    }
+                }
+            } else {
+                if let Some(policy) = cfg.agents.get(claimed_name)
+                    && policy.api_key.is_some()
+                {
+                    tracing::warn!(agent = claimed_name, "api_key required but not provided");
+                    return StatusCode::UNAUTHORIZED.into_response();
+                }
+                claimed_name.to_string()
+            }
+        };
+        let session_id = state.sessions.create(agent_name.clone()).await;
+        tracing::info!(
+            session_id,
+            agent = agent_name,
+            "session created (streamable)"
+        );
+
+        let (response, rl, request_id) = state.gateway.handle(&agent_name, msg, client_ip).await;
+        return match response {
+            Some(body) => {
+                let mut res = Json(body).into_response();
+                if let Ok(val) = HeaderValue::from_str(&session_id) {
+                    res.headers_mut().insert("mcp-session-id", val);
+                }
+                if let Ok(val) = HeaderValue::from_str(&request_id) {
+                    res.headers_mut().insert("x-request-id", val);
+                }
+                if let Some(rl) = &rl {
+                    insert_rl_headers(&mut res, rl);
+                }
+                res
+            }
+            None => StatusCode::ACCEPTED.into_response(),
+        };
+    }
+
+    // Non-initialize: resolve session, run pipeline, return JSON or SSE.
+    match resolve_agent(&state.sessions, &headers).await {
+        Ok(agent_id) => {
+            if method == "tools/call"
+                && let Some(tool_name) = msg["params"]["name"].as_str()
+                && state.kill_switch.lock().unwrap().contains(tool_name)
+            {
+                tracing::warn!(
+                    agent = %agent_id,
+                    tool = tool_name,
+                    "kill switch: tool blocked by operator"
+                );
+                let id = msg.get("id").cloned();
+                let error_body = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "error": {
+                        "code": -32603,
+                        "message": format!("tool '{}' is blocked by operator", tool_name)
+                    }
+                });
+                return if use_sse {
+                    json_as_sse_response(error_body).into_response()
+                } else {
+                    Json(error_body).into_response()
+                };
+            }
+
+            let (response, rl, request_id) = state.gateway.handle(&agent_id, msg, client_ip).await;
+            match response {
+                Some(body) => {
+                    if use_sse {
+                        let mut res = json_as_sse_response(body).into_response();
+                        if let Ok(val) = HeaderValue::from_str(&request_id) {
+                            res.headers_mut().insert("x-request-id", val);
+                        }
+                        if let Some(rl) = &rl {
+                            insert_rl_headers(&mut res, rl);
+                        }
+                        res
+                    } else {
+                        let mut res = Json(body).into_response();
+                        if let Ok(val) = HeaderValue::from_str(&request_id) {
+                            res.headers_mut().insert("x-request-id", val);
+                        }
+                        if let Some(rl) = &rl {
+                            insert_rl_headers(&mut res, rl);
+                        }
+                        res
+                    }
                 }
                 None => StatusCode::ACCEPTED.into_response(),
             }

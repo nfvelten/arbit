@@ -24,7 +24,11 @@ use arbitus::{
     prompt_injection,
     schema_cache::SchemaCache,
     secrets::{self, openbao::OpenBaoProvider},
-    transport::{Transport, http::HttpTransport, stdio::StdioTransport},
+    transport::{
+        Transport,
+        http::{HttpTransport, StreamableHttpTransport},
+        stdio::StdioTransport,
+    },
     upstream::{McpUpstream, http::HttpUpstream},
 };
 use clap::{Parser, Subcommand};
@@ -385,6 +389,43 @@ async fn cmd_start(config_path: String) -> anyhow::Result<()> {
                 schema_cache,
             ));
             HttpTransport::new(
+                addr,
+                session_ttl_secs,
+                tls,
+                metrics,
+                config_rx,
+                jwt,
+                sqlite_db_path,
+                config.admin_token,
+                hitl_store,
+                oauth_manager,
+            )
+            .serve(gateway)
+            .await?;
+        }
+        TransportConfig::StreamableHttp {
+            addr,
+            upstream,
+            session_ttl_secs,
+            tls,
+            circuit_breaker,
+        } => {
+            tracing::info!(upstream, addr, "streamable-HTTP mode");
+            let default_upstream = Arc::new(HttpUpstream::with_circuit_breaker(
+                &upstream,
+                circuit_breaker.threshold,
+                circuit_breaker.recovery_secs,
+            ));
+            let gateway = Arc::new(McpGateway::new(
+                pipeline,
+                default_upstream,
+                named_upstreams,
+                audit.clone(),
+                Arc::clone(&metrics),
+                config_rx.clone(),
+                schema_cache,
+            ));
+            StreamableHttpTransport::new(
                 addr,
                 session_ttl_secs,
                 tls,

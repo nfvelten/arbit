@@ -55,6 +55,27 @@ pub enum TransportConfig {
         #[serde(default)]
         circuit_breaker: CircuitBreakerConfig,
     },
+    /// MCP Streamable HTTP transport (spec 2025-03-26).
+    ///
+    /// `POST /mcp` accepts both `application/json` and `text/event-stream` responses.
+    /// `GET  /mcp` opens a server-initiated SSE stream for the session.
+    /// `DELETE /mcp` terminates the session.
+    ///
+    /// Use this when connecting to clients or upstreams that implement the
+    /// current MCP spec. The legacy `http` (SSE) transport remains available
+    /// for backward compatibility.
+    #[serde(rename = "streamable_http")]
+    StreamableHttp {
+        #[serde(default = "default_addr")]
+        addr: String,
+        #[serde(default = "default_upstream_url")]
+        upstream: String,
+        #[serde(default = "default_session_ttl")]
+        session_ttl_secs: u64,
+        tls: Option<TlsConfig>,
+        #[serde(default)]
+        circuit_breaker: CircuitBreakerConfig,
+    },
     Stdio {
         server: Vec<String>,
         /// Optional binary verification before spawn (supply-chain security).
@@ -676,19 +697,20 @@ impl Config {
     /// Override the upstream URL in the transport config.
     /// No-op for stdio transport (no upstream URL concept).
     pub fn set_upstream_url(&mut self, url: String) {
-        if let TransportConfig::Http { upstream, .. } = &mut self.transport {
-            *upstream = url;
+        match &mut self.transport {
+            TransportConfig::Http { upstream, .. }
+            | TransportConfig::StreamableHttp { upstream, .. } => *upstream = url,
+            TransportConfig::Stdio { .. } => {}
         }
     }
 
     /// Override the listen address in the transport config.
     /// No-op for stdio transport.
     pub fn set_listen_addr(&mut self, addr: String) {
-        if let TransportConfig::Http {
-            addr: current_addr, ..
-        } = &mut self.transport
-        {
-            *current_addr = addr;
+        match &mut self.transport {
+            TransportConfig::Http { addr: a, .. }
+            | TransportConfig::StreamableHttp { addr: a, .. } => *a = addr,
+            TransportConfig::Stdio { .. } => {}
         }
     }
 
@@ -738,7 +760,13 @@ impl Config {
         }
 
         // Validate TLS files exist when TLS is configured
-        if let TransportConfig::Http { tls: Some(tls), .. } = &self.transport {
+        let tls_opt = match &self.transport {
+            TransportConfig::Http { tls, .. } | TransportConfig::StreamableHttp { tls, .. } => {
+                tls.as_ref()
+            }
+            TransportConfig::Stdio { .. } => None,
+        };
+        if let Some(tls) = tls_opt {
             if !std::path::Path::new(&tls.cert).exists() {
                 return Err(anyhow::anyhow!("TLS cert file not found: {}", tls.cert));
             }
@@ -748,10 +776,16 @@ impl Config {
         }
 
         // Validate circuit breaker threshold is non-zero
-        if let TransportConfig::Http {
-            circuit_breaker: cb,
-            ..
-        } = &self.transport
+        let cb_opt = match &self.transport {
+            TransportConfig::Http {
+                circuit_breaker, ..
+            }
+            | TransportConfig::StreamableHttp {
+                circuit_breaker, ..
+            } => Some(circuit_breaker),
+            TransportConfig::Stdio { .. } => None,
+        };
+        if let Some(cb) = cb_opt
             && cb.threshold == 0
         {
             return Err(anyhow::anyhow!("circuit_breaker.threshold must be > 0"));
